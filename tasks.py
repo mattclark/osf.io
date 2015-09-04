@@ -793,10 +793,10 @@ def webpack(clean=False, watch=False, dev=False):
 
 @task()
 def build_js_config_files():
-    from website import settings
-    from website.app import build_js_config_files as _build_js_config_files
-    print('Building JS config files...')
-    _build_js_config_files(settings)
+    # from website import settings
+    # from website.app import build_js_config_files as _build_js_config_files
+    # print('Building JS config files...')
+    # _build_js_config_files(settings)
     print("...Done.")
 
 
