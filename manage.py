@@ -11,6 +11,7 @@ if __name__ == "__main__":
     if 'no_database' not in sys.argv:
         from website.app import init_app
         init_app(set_backends=False, routes=False, attach_request_handlers=False)
+        sys.argv.remove("no_database")
 
     if 'livereload' in sys.argv:
         from django.core.wsgi import get_wsgi_application
@@ -23,4 +24,4 @@ if __name__ == "__main__":
 
         server.serve(port=8000)
     else:
-        execute_from_command_line(sys.argv.remove("no_database"))
+        execute_from_command_line(sys.argv)
