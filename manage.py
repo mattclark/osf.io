@@ -9,12 +9,10 @@ if __name__ == "__main__":
     from django.core.management import execute_from_command_line
     from website.app import init_app
 
-    if 'no_database' in sys.argv:
-        init_app(set_backends=False, routes=False, attach_request_handlers=False)
-        sys.argv.remove("no_database")
-    else:
+    if 'no_database' not in sys.argv:
         init_app(set_backends=True, routes=False, attach_request_handlers=False)
-
+        sys.argv.remove("no_database")
+    
     if 'livereload' in sys.argv:
         from django.core.wsgi import get_wsgi_application
         from livereload import Server
