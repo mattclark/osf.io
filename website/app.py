@@ -13,7 +13,6 @@ from framework.logging import logger
 from framework.mongo import set_up_storage
 from framework.addons.utils import render_addon_capabilities
 from framework.sentry import sentry
-from framework.mongo import handlers as mongo_handlers
 from framework.tasks import handlers as task_handlers
 from framework.transactions import handlers as transaction_handlers
 
@@ -44,6 +43,7 @@ def init_addons(settings, routes=True):
 
 
 def attach_handlers(app, settings):
+    from framework.mongo import handlers as mongo_handlers
     """Add callback handlers to ``app`` in the correct order."""
     # Add callback handlers to application
     add_handlers(app, mongo_handlers.handlers)
