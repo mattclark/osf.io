@@ -803,14 +803,14 @@ def build_js_config_files():
 
 
 @task()
-def assets(dev=False, watch=False, build_js_config=True):
+def assets(dev=False, watch=False, skipJsConfig=False):
     """Install and build static assets."""
     npm = 'npm install'
     if not dev:
         npm += ' --production'
     run(npm, echo=True)
     bower_install()
-    if build_js_config:
+    if not skipJsConfig:
         build_js_config_files()
     from website.project.model import Node
     with open(os.path.join(settings.STATIC_FOLDER, 'built', 'nodeCategories.json'), 'wb') as fp:
