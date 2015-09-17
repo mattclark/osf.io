@@ -808,7 +808,7 @@ def assets(dev=False, watch=False):
         npm += ' --production'
     run(npm, echo=True)
     bower_install()
-    build_js_config_files()
+   # build_js_config_files()
     # Always set clean=False to prevent possible mistakes
     # on prod
     webpack(clean=False, watch=watch, dev=dev)
