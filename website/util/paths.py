@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 def load_asset_paths():
     if settings.DEBUG_MODE:
-        logger.warn('Skipping load of "webpack-assets.json" in DEBUG_MODE.')
+        logger.info('Skipping load of "webpack-assets.json" in DEBUG_MODE.')
         return
     asset_paths = None
     try:
