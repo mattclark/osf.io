@@ -9,6 +9,8 @@ import code
 import platform
 import subprocess
 import logging
+import json
+
 
 from invoke import task, run
 
@@ -808,7 +810,10 @@ def assets(dev=False, watch=False):
         npm += ' --production'
     run(npm, echo=True)
     bower_install()
-   # build_js_config_files()
+    # build_js_config_files()
+    from website.project.model import Node
+    with open(os.path.join(settings.STATIC_FOLDER, 'built', 'nodeCategories.json'), 'wb') as fp:
+        json.dump(Node.CATEGORY_MAP, fp)
     # Always set clean=False to prevent possible mistakes
     # on prod
     webpack(clean=False, watch=watch, dev=dev)
