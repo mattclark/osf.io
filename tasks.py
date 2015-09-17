@@ -810,7 +810,7 @@ def assets(dev=False, watch=False, skipJsConfig=False):
         npm += ' --production'
     run(npm, echo=True)
     bower_install()
-    if not skipJsConfig:
+    if skipJsConfig:
         build_js_config_files()
     from website.project.model import Node
     with open(os.path.join(settings.STATIC_FOLDER, 'built', 'nodeCategories.json'), 'wb') as fp:
