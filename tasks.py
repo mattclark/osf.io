@@ -810,11 +810,8 @@ def assets(dev=False, watch=False, skipJsConfig=False):
         npm += ' --production'
     run(npm, echo=True)
     bower_install()
-    if skipJsConfig:
+    if not skipJsConfig:
         build_js_config_files()
-    from website.project.model import Node
-    with open(os.path.join(settings.STATIC_FOLDER, 'built', 'nodeCategories.json'), 'wb') as fp:
-        json.dump(Node.CATEGORY_MAP, fp)
     # Always set clean=False to prevent possible mistakes
     # on prod
     webpack(clean=False, watch=watch, dev=dev)
