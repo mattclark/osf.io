@@ -4,14 +4,14 @@
 import mock
 
 from tests.base import OsfTestCase
-from tests.factories import UserFactory
+from osf_tests.factories import UserFactory
+from nose.tools import assert_false
 
 import functools
 
 from framework import sentry
-from framework.sessions import Session, set_session
-
-from website import settings
+from framework.sessions import set_session
+from osf.models import Session
 
 
 def set_sentry(status):
@@ -27,8 +27,6 @@ def set_sentry(status):
 
 with_sentry = set_sentry(True)
 without_sentry = set_sentry(False)
-
-
 
 @with_sentry
 @mock.patch('framework.sentry.sentry.captureException')
@@ -47,9 +45,7 @@ class TestSentry(OsfTestCase):
         sentry.log_exception()
         mock_capture.assert_called_with(
             extra={
-                'session': {
-                    'history': [],
-                },
+                'session': {},
             },
         )
 
@@ -65,7 +61,6 @@ class TestSentry(OsfTestCase):
             extra={
                 'session': {
                     'auth_user_id': user._id,
-                    'history': [],
                 },
             },
         )
@@ -74,4 +69,4 @@ class TestSentry(OsfTestCase):
     @mock.patch('framework.sentry.sentry.captureException')
     def test_log_not_enabled(self, mock_capture):
         sentry.log_exception()
-        mock_capture.assert_not_called()
+        assert_false(mock_capture.called)

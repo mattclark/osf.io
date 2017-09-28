@@ -1,293 +1,210 @@
 # -*- coding: utf-8 -*-
-import logging
 import itertools
-import math
 import httplib as http
+import logging
+import math
+import os
+import requests
+import urllib
 
-from modularodm import Q
-from flask import request
+from django.apps import apps
+from django.db.models import Count
+from flask import request, send_from_directory, Response, stream_with_context
 
-from framework import utils
 from framework import sentry
-from framework.auth.core import User
-from framework.flask import redirect  # VOL-aware redirect
-from framework.routing import proxy_url
-from framework.exceptions import HTTPError
-from framework.auth.forms import SignInForm
-from framework.forms import utils as form_utils
-from framework.guid.model import GuidStoredObject
-from framework.auth.forms import RegistrationForm
-from framework.auth.forms import ResetPasswordForm
-from framework.auth.forms import ForgotPasswordForm
-from framework.auth.decorators import collect_auth
+from framework.auth import Auth
 from framework.auth.decorators import must_be_logged_in
+from framework.auth.forms import SignInForm, ForgotPasswordForm
+from framework.exceptions import HTTPError
+from framework.flask import redirect  # VOL-aware redirect
+from framework.forms import utils as form_utils
+from framework.routing import proxy_url
+from framework.auth.core import get_current_user_id
+from website.institutions.views import serialize_institution
 
-from website.models import Guid
-from website.models import Node
-from website.util import rubeus
-from website.project import model
-from website.util import web_url_for
+from osf.models import BaseFileNode, Guid, Institution, PreprintService, AbstractNode
+from website.settings import EXTERNAL_EMBER_APPS, PROXY_EMBER_APPS, INSTITUTION_DISPLAY_NODE_THRESHOLD
+from website.project.model import has_anonymous_link
 from website.util import permissions
-from website.project import new_dashboard
-from website.settings import ALL_MY_PROJECTS_ID
-from website.settings import ALL_MY_REGISTRATIONS_ID
 
 logger = logging.getLogger(__name__)
+preprints_dir = os.path.abspath(os.path.join(os.getcwd(), EXTERNAL_EMBER_APPS['preprints']['path']))
 
+def serialize_contributors_for_summary(node, max_count=3):
+    # # TODO: Use .filter(visible=True) when chaining is fixed in django-include
+    users = [contrib.user for contrib in node.contributor_set.all() if contrib.visible]
+    contributors = []
+    n_contributors = len(users)
+    others_count = ''
 
-def _rescale_ratio(auth, nodes):
-    """Get scaling denominator for log lists across a sequence of nodes.
+    for index, user in enumerate(users[:max_count]):
 
-    :param nodes: Nodes
-    :return: Max number of logs
+        if index == max_count - 1 and len(users) > max_count:
+            separator = ' &'
+            others_count = str(n_contributors - 3)
+        elif index == len(users) - 1:
+            separator = ''
+        elif index == len(users) - 2:
+            separator = ' &'
+        else:
+            separator = ','
+        contributor = user.get_summary(formatter='surname')
+        contributor['user_id'] = user._primary_key
+        contributor['separator'] = separator
 
-    """
-    if not nodes:
-        return 0
-    counts = [
-        len(node.logs)
-        for node in nodes
-        if node.can_view(auth)
-    ]
-    if counts:
-        return float(max(counts))
-    return 0.0
-
-
-def _render_node(node, auth=None):
-    """
-
-    :param node:
-    :return:
-
-    """
-    perm = None
-    # NOTE: auth.user may be None if viewing public project while not
-    # logged in
-    if auth and auth.user and node.get_permissions(auth.user):
-        perm_list = node.get_permissions(auth.user)
-        perm = permissions.reduce_permissions(perm_list)
+        contributors.append(contributor)
 
     return {
-        'title': node.title,
-        'id': node._primary_key,
-        'url': node.url,
-        'api_url': node.api_url,
-        'primary': node.primary,
-        'date_modified': utils.iso8601format(node.date_modified),
-        'category': node.category,
-        'permissions': perm,  # A string, e.g. 'admin', or None,
+        'contributors': contributors,
+        'others_count': others_count,
     }
 
 
-def _render_nodes(nodes, auth=None):
-    """
-
-    :param nodes:
-    :return:
-    """
-    ret = {
-        'nodes': [
-            _render_node(node, auth)
-            for node in nodes
-        ],
-        'rescale_ratio': _rescale_ratio(auth, nodes),
+def serialize_node_summary(node, auth, primary=True, show_path=False):
+    is_registration = node.is_registration
+    summary = {
+        'id': node._id,
+        'primary': primary,
+        'is_registration': node.is_registration,
+        'is_fork': node.is_fork,
+        'is_pending_registration': node.is_pending_registration if is_registration else False,
+        'is_retracted': node.is_retracted if is_registration else False,
+        'is_pending_retraction': node.is_pending_retraction if is_registration else False,
+        'embargo_end_date': node.embargo_end_date.strftime('%A, %b. %d, %Y') if is_registration and node.embargo_end_date else False,
+        'is_pending_embargo': node.is_pending_embargo if is_registration else False,
+        'is_embargoed': node.is_embargoed if is_registration else False,
+        'archiving': node.archiving if is_registration else False,
     }
-    return ret
+
+    parent_node = node.parent_node
+    user = auth.user
+    if node.can_view(auth):
+        # Re-query node with contributor guids included to prevent N contributor queries
+        node = AbstractNode.objects.filter(pk=node.pk).include('contributor__user__guids').get()
+        contributor_data = serialize_contributors_for_summary(node)
+        summary.update({
+            'can_view': True,
+            'can_edit': node.can_edit(auth),
+            'primary_id': node._id,
+            'url': node.url,
+            'primary': primary,
+            'api_url': node.api_url,
+            'title': node.title,
+            'category': node.category,
+            'isPreprint': bool(node.preprint_file_id),
+            'childExists': node.nodes_active.exists(),
+            'is_admin': node.has_permission(user, permissions.ADMIN),
+            'is_contributor': node.is_contributor(user),
+            'logged_in': auth.logged_in,
+            'node_type': node.project_or_component,
+            'is_fork': node.is_fork,
+            'is_registration': is_registration,
+            'anonymous': has_anonymous_link(node, auth),
+            'registered_date': node.registered_date.strftime('%Y-%m-%d %H:%M UTC')
+            if node.is_registration
+            else None,
+            'forked_date': node.forked_date.strftime('%Y-%m-%d %H:%M UTC')
+            if node.is_fork
+            else None,
+            'ua_count': None,
+            'ua': None,
+            'non_ua': None,
+            'is_public': node.is_public,
+            'parent_title': parent_node.title if parent_node else None,
+            'parent_is_public': parent_node.is_public if parent_node else False,
+            'show_path': show_path,
+            # Read nlogs annotation if possible
+            'nlogs': node.nlogs if hasattr(node, 'nlogs') else node.logs.count(),
+            'contributors': contributor_data['contributors'],
+            'others_count': contributor_data['others_count'],
+        })
+    else:
+        summary['can_view'] = False
+
+    return summary
 
 
-@collect_auth
-def index(auth):
-    """Redirect to dashboard if user is logged in, else show homepage.
+def index():
+    try:  # Check if we're on an institution landing page
+        #TODO : make this way more robust
+        institution = Institution.objects.get(domains__contains=[request.host.lower()], is_deleted=False)
+        inst_dict = serialize_institution(institution)
+        inst_dict.update({
+            'home': False,
+            'institution': True,
+            'redirect_url': '/institutions/{}/'.format(institution._id),
+        })
 
-    """
-    if auth.user:
-        return redirect(web_url_for('dashboard'))
-    return {}
+        return inst_dict
+    except Institution.DoesNotExist:
+        pass
 
-
-def find_dashboard(user):
-    dashboard_folder = user.node__contributed.find(
-        Q('is_dashboard', 'eq', True)
-    )
-
-    if dashboard_folder.count() == 0:
-        new_dashboard(user)
-        dashboard_folder = user.node__contributed.find(
-            Q('is_dashboard', 'eq', True)
+    user_id = get_current_user_id()
+    if user_id:  # Logged in: return either landing page or user home page
+        all_institutions = (
+            Institution.objects.filter(
+                is_deleted=False,
+                nodes__is_public=True,
+                nodes__is_deleted=False,
+                nodes__type='osf.node'
+            )
+            .annotate(Count('nodes'))
+            .filter(nodes__count__gte=INSTITUTION_DISPLAY_NODE_THRESHOLD)
+            .order_by('name').only('_id', 'name', 'logo_name')
         )
-    return dashboard_folder[0]
+        dashboard_institutions = [
+            {'id': inst._id, 'name': inst.name, 'logo_path': inst.logo_path_rounded_corners}
+            for inst in all_institutions
+        ]
+
+        return {
+            'home': True,
+            'dashboard_institutions': dashboard_institutions,
+        }
+    else:  # Logged out: return landing page
+        return {
+            'home': True,
+        }
 
 
-@must_be_logged_in
-def get_dashboard(auth, nid=None, **kwargs):
-    user = auth.user
-    if nid is None:
-        node = find_dashboard(user)
-        dashboard_projects = [rubeus.to_project_root(node, auth, **kwargs)]
-        return_value = {'data': dashboard_projects}
-    elif nid == ALL_MY_PROJECTS_ID:
-        return_value = {'data': get_all_projects_smart_folder(**kwargs)}
-    elif nid == ALL_MY_REGISTRATIONS_ID:
-        return_value = {'data': get_all_registrations_smart_folder(**kwargs)}
-    else:
-        node = Node.load(nid)
-        dashboard_projects = rubeus.to_project_hgrid(node, auth, **kwargs)
-        return_value = {'data': dashboard_projects}
-
-    return_value['timezone'] = user.timezone
-    return_value['locale'] = user.locale
-    return_value['id'] = user._id
-    return return_value
-
-
-@must_be_logged_in
-def get_all_projects_smart_folder(auth, **kwargs):
-    # TODO: Unit tests
-    user = auth.user
-
-    contributed = user.node__contributed
-    nodes = contributed.find(
-        Q('is_deleted', 'eq', False) &
-        Q('is_registration', 'eq', False) &
-        Q('is_folder', 'eq', False)
-    ).sort('-title')
-
-    keys = nodes.get_keys()
-    return [rubeus.to_project_root(node, auth, **kwargs) for node in nodes if node.parent_id not in keys]
-
-@must_be_logged_in
-def get_all_registrations_smart_folder(auth, **kwargs):
-    # TODO: Unit tests
-    user = auth.user
-    contributed = user.node__contributed
-
-    nodes = contributed.find(
-        Q('is_deleted', 'eq', False) &
-        Q('is_registration', 'eq', True) &
-        Q('is_folder', 'eq', False)
-    ).sort('-title')
-
-    keys = nodes.get_keys()
-    return [rubeus.to_project_root(node, auth, **kwargs) for node in nodes if node.parent_id not in keys]
-
-@must_be_logged_in
-def get_dashboard_nodes(auth):
-    """Get summary information about the current user's dashboard nodes.
-
-    :param-query no_components: Exclude components from response.
-        NOTE: By default, components will only be shown if the current user
-        is contributor on a comonent but not its parent project. This query
-        parameter forces ALL components to be excluded from the request.
-    :param-query permissions: Filter upon projects for which the current user
-        has the specified permissions. Examples: 'write', 'admin'
-    """
-    user = auth.user
-
-    contributed = user.node__contributed  # nodes user contributed to
-
-    nodes = contributed.find(
-        Q('category', 'eq', 'project') &
-        Q('is_deleted', 'eq', False) &
-        Q('is_registration', 'eq', False) &
-        Q('is_folder', 'eq', False)
-    )
-
-    if request.args.get('no_components') not in [True, 'true', 'True', '1', 1]:
-        comps = contributed.find(
-            # components only
-            Q('category', 'ne', 'project') &
-            # exclude deleted nodes
-            Q('is_deleted', 'eq', False) &
-            # exclude registrations
-            Q('is_registration', 'eq', False)
-        )
-    else:
-        comps = []
-
-    nodes = list(nodes) + list(comps)
-    if request.args.get('permissions'):
-        perm = request.args['permissions'].strip().lower()
-        if perm not in permissions.PERMISSIONS:
-            raise HTTPError(http.BAD_REQUEST, dict(
-                message_short='Invalid query parameter',
-                message_long='{0} is not in {1}'.format(perm, permissions.PERMISSIONS)
-            ))
-        response_nodes = [node for node in nodes if node.has_permission(user, permission=perm)]
-    else:
-        response_nodes = nodes
-    return _render_nodes(response_nodes, auth)
-
+def find_bookmark_collection(user):
+    Collection = apps.get_model('osf.Collection')
+    return Collection.objects.get(creator=user, is_deleted=False, is_bookmark_collection=True)
 
 @must_be_logged_in
 def dashboard(auth):
+    return redirect('/')
+
+
+@must_be_logged_in
+def my_projects(auth):
     user = auth.user
-    dashboard_folder = find_dashboard(user)
-    dashboard_id = dashboard_folder._id
+    bookmark_collection = find_bookmark_collection(user)
+    my_projects_id = bookmark_collection._id
     return {'addons_enabled': user.get_addon_names(),
-            'dashboard_id': dashboard_id,
+            'dashboard_id': my_projects_id,
             }
 
 
+def validate_page_num(page, pages):
+    if page < 0 or (pages and page >= pages):
+        raise HTTPError(http.BAD_REQUEST, data=dict(
+            message_long='Invalid value for "page".'
+        ))
+
+
 def paginate(items, total, page, size):
+    pages = math.ceil(total / float(size))
+    validate_page_num(page, pages)
+
     start = page * size
     paginated_items = itertools.islice(items, start, start + size)
-    pages = math.ceil(total / float(size))
 
     return paginated_items, pages
 
 
-@must_be_logged_in
-def watched_logs_get(**kwargs):
-    user = kwargs['auth'].user
-    try:
-        page = int(request.args.get('page', 0))
-    except ValueError:
-        raise HTTPError(http.BAD_REQUEST, data=dict(
-            message_long='Invalid value for "page".'
-        ))
-    try:
-        size = int(request.args.get('size', 10))
-    except ValueError:
-        raise HTTPError(http.BAD_REQUEST, data=dict(
-            message_long='Invalid value for "size".'
-        ))
-
-    total = sum(1 for x in user.get_recent_log_ids())
-    paginated_logs, pages = paginate(user.get_recent_log_ids(), total, page, size)
-    logs = (model.NodeLog.load(id) for id in paginated_logs)
-
-    return {
-        "logs": [serialize_log(log) for log in logs],
-        "total": total,
-        "pages": pages,
-        "page": page
-    }
-
-
-def serialize_log(node_log, auth=None, anonymous=False):
-    '''Return a dictionary representation of the log.'''
-    return {
-        'id': str(node_log._primary_key),
-        'user': node_log.user.serialize()
-        if isinstance(node_log.user, User)
-        else {'fullname': node_log.foreign_user},
-        'contributors': [node_log._render_log_contributor(c) for c in node_log.params.get("contributors", [])],
-        'api_key': node_log.api_key.label if node_log.api_key else '',
-        'action': node_log.action,
-        'params': node_log.params,
-        'date': utils.iso8601format(node_log.date),
-        'node': node_log.node.serialize(auth) if node_log.node else None,
-        'anonymous': anonymous
-    }
-
-
 def reproducibility():
     return redirect('/ezcuj/wiki')
-
-
-def registration_form():
-    return form_utils.jsonify(RegistrationForm(prefix='register'))
 
 
 def signin_form():
@@ -298,10 +215,6 @@ def forgot_password_form():
     return form_utils.jsonify(ForgotPasswordForm(prefix='forgot_password'))
 
 
-def reset_password_form():
-    return form_utils.jsonify(ResetPasswordForm())
-
-
 # GUID ###
 
 def _build_guid_url(base, suffix=None):
@@ -309,7 +222,13 @@ def _build_guid_url(base, suffix=None):
         each.strip('/') for each in [base, suffix]
         if each
     ])
+    if not isinstance(url, unicode):
+        url = url.decode('utf-8')
     return u'/{0}/'.format(url)
+
+
+def resolve_guid_download(guid, suffix=None, provider=None):
+    return resolve_guid(guid, suffix='download')
 
 
 def resolve_guid(guid, suffix=None):
@@ -321,18 +240,23 @@ def resolve_guid(guid, suffix=None):
     :param str suffix: Remainder of URL after the GUID
     :return: Return value of proxied view function
     """
-    # Look up GUID
-    guid_object = Guid.load(guid)
+    try:
+        # Look up
+        guid_object = Guid.load(guid)
+    except KeyError as e:
+        if e.message == 'osfstorageguidfile':  # Used when an old detached OsfStorageGuidFile object is accessed
+            raise HTTPError(http.NOT_FOUND)
+        else:
+            raise e
     if guid_object:
-
-        # verify that the object is a GuidStoredObject descendant. If a model
-        #   was once a descendant but that relationship has changed, it's
+        # verify that the object implements a GuidStoredObject-like interface. If a model
+        #   was once GuidStoredObject-like but that relationship has changed, it's
         #   possible to have referents that are instances of classes that don't
-        #   have a redirect_mode attribute or otherwise don't behave as
+        #   have a deep_url attribute or otherwise don't behave as
         #   expected.
-        if not isinstance(guid_object.referent, GuidStoredObject):
+        if not hasattr(guid_object.referent, 'deep_url'):
             sentry.log_message(
-                'Guid `{}` resolved to non-guid object'.format(guid)
+                'Guid resolved to an object with no deep_url', dict(guid=guid)
             )
             raise HTTPError(http.NOT_FOUND)
         referent = guid_object.referent
@@ -341,7 +265,45 @@ def resolve_guid(guid, suffix=None):
             raise HTTPError(http.NOT_FOUND)
         if not referent.deep_url:
             raise HTTPError(http.NOT_FOUND)
-        url = _build_guid_url(referent.deep_url, suffix)
+
+        # Handle file `/download` shortcut with supported types.
+        if suffix and suffix.rstrip('/').lower() == 'download':
+            file_referent = None
+            if isinstance(referent, PreprintService) and referent.primary_file:
+                if not referent.is_published:
+                    # TODO: Ideally, permissions wouldn't be checked here.
+                    # This is necessary to prevent a logical inconsistency with
+                    # the routing scheme - if a preprint is not published, only
+                    # admins should be able to know it exists.
+                    auth = Auth.from_kwargs(request.args.to_dict(), {})
+                    if not referent.node.has_permission(auth.user, permissions.ADMIN):
+                        raise HTTPError(http.NOT_FOUND)
+                file_referent = referent.primary_file
+            elif isinstance(referent, BaseFileNode) and referent.is_file:
+                file_referent = referent
+
+            if file_referent:
+                # Extend `request.args` adding `action=download`.
+                request.args = request.args.copy()
+                request.args.update({'action': 'download'})
+                # Do not include the `download` suffix in the url rebuild.
+                url = _build_guid_url(urllib.unquote(file_referent.deep_url))
+                return proxy_url(url)
+
+        # Handle Ember Applications
+        if isinstance(referent, PreprintService):
+            if referent.provider.domain_redirect_enabled:
+                # This route should always be intercepted by nginx for the branded domain,
+                # w/ the exception of `<guid>/download` handled above.
+                return redirect(referent.absolute_url, http.MOVED_PERMANENTLY)
+
+            if PROXY_EMBER_APPS:
+                resp = requests.get(EXTERNAL_EMBER_APPS['preprints']['server'], stream=True)
+                return Response(stream_with_context(resp.iter_content()), resp.status_code)
+
+            return send_from_directory(preprints_dir, 'index.html')
+
+        url = _build_guid_url(urllib.unquote(referent.deep_url), suffix)
         return proxy_url(url)
 
     # GUID not found; try lower-cased and redirect if exists
@@ -353,3 +315,35 @@ def resolve_guid(guid, suffix=None):
 
     # GUID not found
     raise HTTPError(http.NOT_FOUND)
+
+
+# Redirects #
+
+# redirect osf.io/about/ to OSF wiki page osf.io/4znzp/wiki/home/
+def redirect_about(**kwargs):
+    return redirect('https://osf.io/4znzp/wiki/home/')
+
+def redirect_help(**kwargs):
+    return redirect('/faq/')
+
+def redirect_faq(**kwargs):
+    return redirect('http://help.osf.io/m/faqs/')
+
+# redirect osf.io/howosfworks to osf.io/getting-started/
+def redirect_howosfworks(**kwargs):
+    return redirect('/getting-started/')
+
+
+# redirect osf.io/getting-started to help.osf.io/
+def redirect_getting_started(**kwargs):
+    return redirect('http://help.osf.io/')
+
+
+# Redirect to home page
+def redirect_to_home():
+    return redirect('/')
+
+
+def redirect_to_cos_news(**kwargs):
+    # Redirect to COS News page
+    return redirect('https://cos.io/news/')

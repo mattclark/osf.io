@@ -7,10 +7,8 @@ var faker = require('faker');
 
 var $ = require('jquery');
 var $osf = require('js/osfHelpers');
-var ZeroClipboard = require('zeroclipboard');
 var CitationsNodeConfigVM = require('js/citationsNodeConfig')._CitationsNodeConfigViewModel;
 var testUtils = require('./folderPickerTestUtils.js');
-var FolderPicker = require('js/folderpicker');
 
 var makeAccountList = function() {
     var accounts = [];
@@ -30,9 +28,14 @@ describe('CitationsNodeConfig', () => {
             onPickFolder: onPickFolderSpy
         };
         var vm = new CitationsNodeConfigVM('Fake Addon', settingsUrl, '#fakeAddonScope', '#fakeAddonPicker', opts);
-        // Never actually call doActivatePicker
-        sinon.stub(vm, 'doActivatePicker');
-
+        var activateStub;
+        before(() => {
+            // Never actually call doActivatePicker
+            activateStub = sinon.stub(vm, 'doActivatePicker');
+        });
+        after(() => {
+            activateStub.restore();
+        });
         describe('#fetchAccounts', () => {
             var accountsUrl = faker.internet.ip();
             var accounts = makeAccountList();
@@ -56,7 +59,7 @@ describe('CitationsNodeConfig', () => {
                 vm.updateFromData(data)
                     .always(function() {
                         vm.fetchAccounts()
-                            .done(function(fetched) {
+                            .always(function(fetched) {
                                 assert.deepEqual(fetched, endpoints[0].response.accounts);
                                 done();
                             });

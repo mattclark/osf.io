@@ -1,16 +1,19 @@
-var Fangorn = require('js/fangorn');
+var Fangorn = require('js/fangorn').Fangorn;
 var m = require('mithril');
 var $osf = require('js/osfHelpers');
 
 function FileViewTreebeard(data) {
 
-    // Set item.branch to show the branch of the rendered GitHub file instead of the default branch
+    // Set item.branch to show the branch of the rendered GitHub / Bitbucket file instead of the default branch
     var addonRootFolders = data.data[0].children;
 
-    if (window.contextVars.file.provider === 'github') {
+    if (window.contextVars.file.provider === 'github' || window.contextVars.file.provider === 'bitbucket') {
         for (var i = 0; i < addonRootFolders.length; i++) {
             var item = addonRootFolders[i];
-            if (item.provider === 'github' && item.isAddonRoot && window.contextVars.file.extra.branch) {
+            if (
+                (item.provider === 'github' || item.provider === 'bitbucket') &&
+                    item.isAddonRoot && window.contextVars.file.extra.branch
+            ) {
                 item.branch = window.contextVars.file.extra.branch;
             }
         }
@@ -23,7 +26,7 @@ function FileViewTreebeard(data) {
         showFilter: false,
         title: undefined,
         hideColumnTitles: true,
-        multiselect : false,
+        multiselect : true,
         placement : 'fileview',
         allowMove : false,
         filterTemplate: function () {
@@ -38,27 +41,19 @@ function FileViewTreebeard(data) {
         onload: function(tree) {
             var tb = this;
             Fangorn.DefaultOptions.onload.call(tb, tree);
-            $('.osf-panel-header.osf-panel-header-flex').show();
-            tb.select('.tb-header-row').hide();
-
         },
         ondataload: function () {
             var tb = this;
+            Fangorn.DefaultOptions.ondataload.call(tb);
             var path = '';
             tb.fangornFolderIndex = 0;
             tb.fangornFolderArray = [''];
-            if (window.contextVars.file.path && window.contextVars.file.provider !== 'figshare') {
-                if (window.contextVars.file.provider === 'osfstorage' || window.contextVars.file.provider === 'box') {
-                    path = decodeURIComponent(window.contextVars.file.extra.fullPath);
-                } else {
-                    path = decodeURIComponent(window.contextVars.file.path);
-                }
-                tb.fangornFolderArray = path.split('/');
+            if (window.contextVars.file.path) {
+                tb.fangornFolderArray = window.contextVars.file.materializedPath.split('/');
                 if (tb.fangornFolderArray.length > 1) {
                     tb.fangornFolderArray.splice(0, 1);
                 }
             }
-            m.render($('#filesSearch').get(0), tb.options.filterTemplate.call(tb));
         },
         columnTitles: function () {
             return [{
@@ -78,18 +73,32 @@ function FileViewTreebeard(data) {
             var tb = this;
             Fangorn.DefaultOptions.lazyLoadOnLoad.call(tb, tree, event);
             Fangorn.Utils.setCurrentFileID.call(tb, tree, window.contextVars.node.id, window.contextVars.file);
-            if(!event) {
+            if(!event && tb.isMultiselected(tb.currentFileID)) {
                 Fangorn.Utils.scrollToFile.call(tb, tb.currentFileID);
+            }
+            if (tree.depth > 1) {
+                Fangorn.Utils.orderFolder.call(this, tree);
+            }
+            // if any of the children is the selected add a certain class.
+            for (var i = 0; i < tree.children.length; i++){
+                var item = tree.children[i];
+                if (item.data.kind === 'file' && tb.currentFileID === item.id) {
+                    item.css = 'fangorn-selected';
+                    tb.multiselected([item]);
+                }
             }
         },
         resolveRows: function (item) {
             var tb = this;
             var node = item.parent().parent();
-            if (item.data.kind === 'file' && tb.currentFileID === item.id) {
+            if(tb.isMultiselected(item.id)) {
                 item.css = 'fangorn-selected';
-                tb.multiselected([item]);
+            } else {
+                item.css = '';
             }
-
+            if(item.data.permissions && !item.data.permissions.view){
+                item.css += ' tb-private-row';
+            }
             var defaultColumns = [
                 {
                     data: 'name',

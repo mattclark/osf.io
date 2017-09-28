@@ -1,37 +1,15 @@
 # -*- coding: utf-8 -*-
 import uuid
 
-from .model import Node, PrivateLink
-from framework.forms.utils import sanitize
-from framework.mongo.utils import from_mongo
-from modularodm import Q
-from website.exceptions import NodeStateError
+from django.apps import apps
+from django.core.exceptions import ValidationError
 
-def show_diff(seqm):
-    """Unify operations between two compared strings
-seqm is a difflib.SequenceMatcher instance whose a & b are strings"""
-    output = []
-    insert_el = '<span style="background:#4AA02C; font-size:1.5em; ">'
-    ins_el_close = '</span>'
-    del_el = '<span style="background:#D16587; font-size:1.5em;">'
-    del_el_close = '</span>'
-    for opcode, a0, a1, b0, b1 in seqm.get_opcodes():
-        content_a = sanitize(seqm.a[a0:a1])
-        content_b = sanitize(seqm.b[b0:b1])
-        if opcode == 'equal':
-            output.append(content_a)
-        elif opcode == 'insert':
-            output.append(insert_el + content_b + ins_el_close)
-        elif opcode == 'delete':
-            output.append(del_el + content_a + del_el_close)
-        elif opcode == 'replace':
-            output.append(del_el + content_a + del_el_close + insert_el + content_b + ins_el_close)
-        else:
-            raise RuntimeError("unexpected opcode")
-    return ''.join(output)
+from framework.auth.core import Auth
+from website.exceptions import NodeStateError
+from website.util.sanitize import strip_html
 
 # TODO: This should be a class method of Node
-def new_node(category, title, user, description=None, parent=None):
+def new_node(category, title, user, description='', parent=None):
     """Create a new project or component.
 
     :param str category: Node category
@@ -42,10 +20,13 @@ def new_node(category, title, user, description=None, parent=None):
     :return Node: Created node
 
     """
+    # We use apps.get_model rather than import .model.Node
+    # because we want the concrete Node class, not AbstractNode
+    Node = apps.get_model('osf.Node')
     category = category
-    title = sanitize(title.strip())
+    title = strip_html(title.strip())
     if description:
-        description = sanitize(description.strip())
+        description = strip_html(description.strip())
 
     node = Node(
         title=title,
@@ -59,54 +40,32 @@ def new_node(category, title, user, description=None, parent=None):
 
     return node
 
-def new_dashboard(user):
-    """Create a new dashboard project.
+
+def new_bookmark_collection(user):
+    """Create a new bookmark collection project.
 
     :param User user: User object
     :return Node: Created node
 
     """
-    existing_dashboards = user.node__contributed.find(
-        Q('category', 'eq', 'project') &
-        Q('is_dashboard', 'eq', True)
-    )
-
-    if existing_dashboards.count() > 0:
-        raise NodeStateError("Users may only have one dashboard")
-
-    node = Node(
-        title='Dashboard',
+    Collection = apps.get_model('osf.Collection')
+    existing_bookmark_collections = Collection.objects.filter(
+        is_bookmark_collection=True,
         creator=user,
-        category='project',
-        is_dashboard=True,
-        is_folder=True
-    )
+        is_deleted=False
+    ).exists()
 
-    node.save()
+    if existing_bookmark_collections:
+        raise NodeStateError('Users may only have one bookmark collection')
 
-    return node
-
-
-def new_folder(title, user):
-    """Create a new folder project.
-
-    :param str title: Node title
-    :param User user: User object
-    :return Node: Created node
-
-    """
-    title = sanitize(title.strip())
-
-    node = Node(
-        title=title,
+    collection = Collection(
+        title='Bookmarks',
         creator=user,
-        category='project',
-        is_folder=True
+        is_bookmark_collection=True
     )
+    collection.save()
+    return collection
 
-    node.save()
-
-    return node
 
 def new_private_link(name, user, nodes, anonymous):
     """Create a new private link.
@@ -118,33 +77,43 @@ def new_private_link(name, user, nodes, anonymous):
     :return PrivateLink: Created private link
 
     """
-    key = str(uuid.uuid4()).replace("-", "")
+    PrivateLink = apps.get_model('osf.PrivateLink')
+    NodeLog = apps.get_model('osf.NodeLog')
+
+    key = str(uuid.uuid4()).replace('-', '')
     if name:
-        name = sanitize(name.strip())
+        name = strip_html(name)
+        if name is None or not name.strip():
+            raise ValidationError('Invalid link name.')
     else:
-        name = "Shared project link"
+        name = 'Shared project link'
 
     private_link = PrivateLink(
         key=key,
         name=name,
         creator=user,
-        nodes=nodes,
         anonymous=anonymous
     )
 
     private_link.save()
 
+    private_link.nodes.add(*nodes)
+
+    auth = Auth(user)
+    for node in nodes:
+        log_dict = {
+            'project': node.parent_id,
+            'node': node._id,
+            'user': user._id,
+            'anonymous_link': anonymous,
+        }
+
+        node.add_log(
+            NodeLog.VIEW_ONLY_LINK_ADDED,
+            log_dict,
+            auth=auth
+        )
+
+    private_link.save()
+
     return private_link
-
-
-template_name_replacements = {
-    ('.txt', ''),
-    ('_', ' '),
-}
-
-
-def clean_template_name(template_name):
-    template_name = from_mongo(template_name)
-    for replacement in template_name_replacements:
-        template_name = template_name.replace(*replacement)
-    return template_name

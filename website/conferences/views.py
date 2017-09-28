@@ -1,27 +1,23 @@
 # -*- coding: utf-8 -*-
 
-import json
 import httplib
 import logging
 
-from modularodm import Q
-from modularodm.exceptions import ModularOdmException
+from django.db import transaction
+from bulk_update.helper import bulk_update
 
+from addons.osfstorage.models import OsfStorageFile
+from framework.auth import get_or_create_user
 from framework.exceptions import HTTPError
 from framework.flask import redirect
-from framework.transactions.context import TokuTransaction
 from framework.transactions.handlers import no_auto_transaction
-
+from osf.models import AbstractNode, Node, Conference, Tag
 from website import settings
-from website.models import Node
-from website.util import web_url_for
-from website.mails import send_mail
-from website.mails import CONFERENCE_SUBMITTED, CONFERENCE_INACTIVE, CONFERENCE_FAILED
-
-from website.conferences import utils
+from website.conferences import utils, signals
 from website.conferences.message import ConferenceMessage, ConferenceError
-from website.conferences.model import Conference
-
+from website.mails import CONFERENCE_SUBMITTED, CONFERENCE_INACTIVE, CONFERENCE_FAILED
+from website.mails import send_mail
+from website.util import web_url_for
 
 logger = logging.getLogger(__name__)
 
@@ -69,30 +65,52 @@ def add_poster_by_email(conference, message):
             fullname=message.sender_display,
         )
 
-    created = []
+    nodes_created = []
+    users_created = []
 
-    with TokuTransaction():
-        user, user_created = utils.get_or_create_user(
+    with transaction.atomic():
+        user, user_created = get_or_create_user(
             message.sender_display,
             message.sender_email,
-            message.is_spam,
+            is_spam=message.is_spam,
         )
         if user_created:
-            created.append(user)
+            user.save()  # need to save in order to access m2m fields (e.g. tags)
+            users_created.append(user)
+            user.add_system_tag('osf4m')
+            user.update_date_last_login()
+            user.save()
+
+            # must save the user first before accessing user._id
             set_password_url = web_url_for(
-                'reset_password',
-                verification_key=user.verification_key,
+                'reset_password_get',
+                uid=user._id,
+                token=user.verification_key_v2['token'],
                 _absolute=True,
             )
         else:
             set_password_url = None
 
-        node, node_created = utils.get_or_create_node(message.subject, user)
+        node, node_created = Node.objects.get_or_create(
+            title__iexact=message.subject,
+            is_deleted=False,
+            _contributors__guids___id=user._id,
+            defaults={
+                'title': message.subject,
+                'creator': user
+            }
+        )
         if node_created:
-            created.append(node)
+            nodes_created.append(node)
+            node.add_system_tag('osf4m')
+            node.save()
 
         utils.provision_node(conference, message, node, user)
-        utils.record_message(message, created)
+        utils.record_message(message, nodes_created, users_created)
+    # Prevent circular import error
+    from framework.auth import signals as auth_signals
+    if user_created:
+        auth_signals.user_confirmed.send(user)
 
     utils.upload_attachments(user, node, message.attachments)
 
@@ -123,64 +141,81 @@ def add_poster_by_email(conference, message):
         presentation_type=message.conference_category.lower(),
         is_spam=message.is_spam,
     )
+    if node_created and user_created:
+        signals.osf4m_user_created.send(user, conference=conference, node=node)
 
 
-def _render_conference_node(node, idx):
-    storage_settings = node.get_addon('osfstorage')
-    records = storage_settings.root_node.children
-    try:
-        record = next(
-            each for each in records
-            if not each.is_deleted,
-        )
+def _render_conference_node(node, idx, conf):
+    record = OsfStorageFile.objects.filter(node=node).first()
+
+    if not record:
+        download_url = ''
+        download_count = 0
+    else:
         download_count = record.get_download_count()
-
         download_url = node.web_url_for(
             'addon_view_or_download_file',
-            path=record.path,
+            path=record.path.strip('/'),
             provider='osfstorage',
             action='download',
             _absolute=True,
         )
-    except StopIteration:
-        download_url = ''
-        download_count = 0
 
     author = node.visible_contributors[0]
+    tags = list(node.tags.filter(system=False).values_list('name', flat=True))
 
     return {
         'id': idx,
         'title': node.title,
         'nodeUrl': node.url,
-        'author': author.family_name,
-        'authorUrl': node.creator.url,
-        'category': 'talk' if 'talk' in node.system_tags else 'poster',
+        'author': author.family_name if author.family_name else author.fullname,
+        'authorUrl': author.url,
+        'category': conf.field_names['submission1'] if conf.field_names['submission1'] in tags else conf.field_names['submission2'],
         'download': download_count,
         'downloadUrl': download_url,
+        'dateCreated': node.date_created.isoformat(),
+        'confName': conf.name,
+        'confUrl': web_url_for('conference_results', meeting=conf.endpoint),
+        'tags': ' '.join(tags)
     }
 
 
 def conference_data(meeting):
     try:
-        Conference.find_one(Q('endpoint', 'iexact', meeting))
-    except ModularOdmException:
+        conf = Conference.objects.get(endpoint__iexact=meeting)
+    except Conference.DoesNotExist:
         raise HTTPError(httplib.NOT_FOUND)
 
-    nodes = Node.find(
-        Q('tags', 'iexact', meeting) &
-        Q('is_public', 'eq', True) &
-        Q('is_deleted', 'eq', False)
-    )
+    nodes = AbstractNode.objects.filter(tags__id__in=Tag.objects.filter(name__iexact=meeting, system=False).values_list('id', flat=True), is_public=True, is_deleted=False)
 
-    ret = [
-        _render_conference_node(each, idx)
+    return [
+        _render_conference_node(each, idx, conf)
         for idx, each in enumerate(nodes)
     ]
-    return ret
 
 
 def redirect_to_meetings(**kwargs):
     return redirect('/meetings/')
+
+
+def serialize_conference(conf):
+    return {
+        'active': conf.active,
+        'admins': list(conf.admins.all().values_list('guids___id', flat=True)),
+        'end_date': conf.end_date,
+        'endpoint': conf.endpoint,
+        'field_names': conf.field_names,
+        'info_url': conf.info_url,
+        'is_meeting': conf.is_meeting,
+        'location': conf.location,
+        'logo_url': conf.logo_url,
+        'name': conf.name,
+        'num_submissions': conf.num_submissions,
+        'poster': conf.poster,
+        'public_projects': conf.public_projects,
+        'start_date': conf.start_date,
+        'talk': conf.talk,
+    }
 
 
 def conference_results(meeting):
@@ -189,40 +224,53 @@ def conference_results(meeting):
     :param str meeting: Endpoint name for a conference.
     """
     try:
-        conf = Conference.find_one(Q('endpoint', 'iexact', meeting))
-    except ModularOdmException:
+        conf = Conference.objects.get(endpoint=meeting)
+    except Conference.DoesNotExist:
         raise HTTPError(httplib.NOT_FOUND)
 
     data = conference_data(meeting)
 
     return {
-        'data': json.dumps(data),
+        'data': data,
         'label': meeting,
-        'meeting': conf.to_storage(),
+        'meeting': serialize_conference(conf),
         # Needed in order to use base.mako namespace
         'settings': settings,
     }
 
+def conference_submissions(**kwargs):
+    """Return data for all OSF4M submissions.
+
+    The total number of submissions for each meeting is calculated and cached
+    in the Conference.num_submissions field.
+    """
+    conferences = Conference.objects.filter(is_meeting=True)
+    #  TODO: Revisit this loop, there has to be a way to optimize it
+    for conf in conferences:
+        # For efficiency, we filter by tag first, then node
+        # instead of doing a single Node query
+        tags = Tag.objects.filter(system=False, name__iexact=conf.endpoint).values_list('pk', flat=True)
+        nodes = AbstractNode.objects.filter(tags__in=tags, is_public=True, is_deleted=False)
+        # Cache the number of submissions
+        conf.num_submissions = nodes.count()
+    bulk_update(conferences, update_fields=['num_submissions'])
+    return {'success': True}
 
 def conference_view(**kwargs):
-
     meetings = []
     for conf in Conference.find():
-        query = (
-            Q('tags', 'iexact', conf.endpoint)
-            & Q('is_public', 'eq', True)
-            & Q('is_deleted', 'eq', False)
-        )
-        projects = Node.find(query)
-        submissions = projects.count()
-        if submissions < settings.CONFERNCE_MIN_COUNT:
+        if conf.num_submissions < settings.CONFERENCE_MIN_COUNT:
+            continue
+        if (hasattr(conf, 'is_meeting') and (conf.is_meeting is False)):
             continue
         meetings.append({
             'name': conf.name,
-            'active': conf.active,
+            'location': conf.location,
+            'end_date': conf.end_date.strftime('%b %d, %Y') if conf.end_date else None,
+            'start_date': conf.start_date.strftime('%b %d, %Y') if conf.start_date else None,
             'url': web_url_for('conference_results', meeting=conf.endpoint),
-            'submissions': submissions,
+            'count': conf.num_submissions,
         })
-    meetings.sort(key=lambda meeting: meeting['submissions'], reverse=True)
 
+    meetings.sort(key=lambda meeting: meeting['count'], reverse=True)
     return {'meetings': meetings}

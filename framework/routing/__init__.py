@@ -1,40 +1,61 @@
 # -*- coding: utf-8 -*-
-import os
-import logging
+
 import copy
-import json
 import functools
 import httplib as http
+import json
+import logging
+import os
 
-import lxml.html
-import werkzeug.wrappers
-from werkzeug.exceptions import NotFound
-from mako.template import Template
-from mako.lookup import TemplateLookup
 from flask import request, make_response
+from mako.lookup import TemplateLookup
+from mako.template import Template
+import markupsafe
+from werkzeug.exceptions import NotFound
+import werkzeug.wrappers
 
 from framework import sentry
+from framework.exceptions import HTTPError
 from framework.flask import app, redirect
 from framework.sessions import session
-from framework.exceptions import HTTPError
 
 from website import settings
 
 logger = logging.getLogger(__name__)
 
 TEMPLATE_DIR = settings.TEMPLATES_PATH
-_tpl_lookup = TemplateLookup(
+
+_TPL_LOOKUP = TemplateLookup(
+    default_filters=[
+        'unicode',  # default filter; must set explicitly when overriding
+    ],
     directories=[
         TEMPLATE_DIR,
-        os.path.join(settings.BASE_PATH, 'addons/'),
+        settings.ADDON_PATH,
     ],
     module_directory='/tmp/mako_modules'
 )
+
+_TPL_LOOKUP_SAFE = TemplateLookup(
+    default_filters=[
+        'unicode',  # default filter; must set explicitly when overriding
+        'temp_ampersand_fixer',  # FIXME: Temporary workaround for data stored in wrong format in DB. Unescape it before it gets re-escaped by Markupsafe. See [#OSF-4432]
+        'h',
+    ],
+    imports=[
+        'from website.util.sanitize import temp_ampersand_fixer',  # FIXME: Temporary workaround for data stored in wrong format in DB. Unescape it before it gets re-escaped by Markupsafe. See [#OSF-4432]
+    ],
+    directories=[
+        TEMPLATE_DIR,
+        settings.ADDON_PATH,
+    ],
+    module_directory='/tmp/mako_modules',
+)
+
 REDIRECT_CODES = [
     http.MOVED_PERMANENTLY,
     http.FOUND,
 ]
-
 
 class Rule(object):
     """ Container for routing and rendering rules."""
@@ -187,15 +208,33 @@ def render_jinja_string(tpl, data):
     pass
 
 mako_cache = {}
-def render_mako_string(tpldir, tplname, data):
+def render_mako_string(tpldir, tplname, data, trust=True):
+    """Render a mako template to a string.
+
+    :param tpldir:
+    :param tplname:
+    :param data:
+    :param trust: Optional. If ``False``, markup-save escaping will be enabled
+    """
+
+    show_errors = settings.DEBUG_MODE  # thanks to abought
+    # TODO: The "trust" flag is expected to be temporary, and should be removed
+    #       once all templates manually set it to False.
+
+    lookup_obj = _TPL_LOOKUP_SAFE if trust is False else _TPL_LOOKUP
 
     tpl = mako_cache.get(tplname)
     if tpl is None:
+        with open(os.path.join(tpldir, tplname)) as f:
+            tpl_text = f.read()
         tpl = Template(
-            open(os.path.join(tpldir, tplname)).read(),
-            lookup=_tpl_lookup,
+            tpl_text,
+            format_exceptions=show_errors,
+            lookup=lookup_obj,
             input_encoding='utf-8',
             output_encoding='utf-8',
+            default_filters=lookup_obj.template_args['default_filters'],
+            imports=lookup_obj.template_args['imports']  # FIXME: Temporary workaround for data stored in wrong format in DB. Unescape it before it gets re-escaped by Markupsafe. See [#OSF-4432]
         )
     # Don't cache in debug mode
     if not app.debug:
@@ -303,7 +342,7 @@ class Renderer(object):
 
         # Set content type in headers
         headers = headers or {}
-        headers["Content-Type"] = self.CONTENT_TYPE + "; charset=" + kwargs.get("charset", "utf-8")
+        headers['Content-Type'] = self.CONTENT_TYPE + '; charset=' + kwargs.get('charset', 'utf-8')
 
         # Package as response
         return make_response(rendered, status_code, headers)
@@ -315,7 +354,7 @@ class JSONRenderer(Renderer):
 
     """
 
-    CONTENT_TYPE = "application/json"
+    CONTENT_TYPE = 'application/json'
 
     class Encoder(json.JSONEncoder):
         def default(self, obj):
@@ -343,7 +382,7 @@ class XMLRenderer(Renderer):
 
     """
 
-    CONTENT_TYPE = "application/xml"
+    CONTENT_TYPE = 'application/xml'
 
     def handle_error(self, error):
         return str(error.to_data()['message_long']), error.code
@@ -379,9 +418,10 @@ class WebRenderer(Renderer):
                 )
             )
 
-    def __init__(self, template_name, renderer=None, error_renderer=None,
+    def __init__(self, template_name,
+                 renderer=None, error_renderer=None,
                  data=None, detect_render_nested=True,
-                 template_dir=TEMPLATE_DIR):
+                 trust=True, template_dir=TEMPLATE_DIR):
         """Construct WebRenderer.
 
         :param template_name: Name of template file
@@ -392,12 +432,15 @@ class WebRenderer(Renderer):
                      to add to data from view function
         :param detect_render_nested: Auto-detect renderers for nested
             templates?
+        :param trust: Boolean: If true, turn off markup-safe escaping
         :param template_dir: Path to template directory
 
         """
         self.template_name = template_name
         self.data = data or {}
         self.detect_render_nested = detect_render_nested
+        self.trust = trust
+
         self.template_dir = template_dir
         self.renderer = self.detect_renderer(renderer, template_name)
         self.error_renderer = self.detect_renderer(
@@ -433,14 +476,14 @@ class WebRenderer(Renderer):
         :param data: Dictionary to be passed to the template as context
         :return: 2-tuple: (<result>, <flag: replace div>)
         """
-        attributes_string = element.get("mod-meta")
+        attributes_string = element.get('mod-meta')
 
         # Return debug <div> if JSON cannot be parsed
         try:
             element_meta = json.loads(attributes_string)
         except ValueError:
             return '<div>No JSON object could be decoded: {}</div>'.format(
-                attributes_string
+                markupsafe.escape(attributes_string)
             ), True
 
         uri = element_meta.get('uri')
@@ -460,11 +503,11 @@ class WebRenderer(Renderer):
                 uri_data = call_url(uri, view_kwargs=view_kwargs)
                 render_data.update(uri_data)
             except NotFound:
-                return '<div>URI {} not found</div>'.format(uri), is_replace
+                return '<div>URI {} not found</div>'.format(markupsafe.escape(uri)), is_replace
             except Exception as error:
                 logger.exception(error)
                 if error_msg:
-                    return '<div>{}</div>'.format(error_msg), is_replace
+                    return '<div>{}</div>'.format(markupsafe.escape(unicode(error_msg))), is_replace
                 return '<div>Error retrieving URI {}: {}</div>'.format(
                     uri,
                     repr(error)
@@ -506,25 +549,10 @@ class WebRenderer(Renderer):
         # Catch errors and return appropriate debug divs
         # todo: add debug parameter
         try:
-            rendered = renderer(self.template_dir, template_name, data)
+            # TODO: Seems like Jinja2 and handlebars renderers would not work with this call sig
+            rendered = renderer(self.template_dir, template_name, data, trust=self.trust)
         except IOError:
             return '<div>Template {} not found.</div>'.format(template_name)
-
-        html = lxml.html.fragment_fromstring(rendered, create_parent='remove')
-
-        for element in html.findall('.//*[@mod-meta]'):
-
-            # Render nested template
-            template_rendered, is_replace = self.render_element(element, data)
-
-            original = lxml.html.tostring(element)
-            if is_replace:
-                replacement = template_rendered
-            else:
-                replacement = original
-                replacement = replacement.replace('><', '>' + template_rendered + '<')
-
-            rendered = rendered.replace(original, replacement)
 
         ## Parse HTML using html5lib; lxml is too strict and e.g. throws
         ## errors if missing parent container; htmlparser mangles whitespace

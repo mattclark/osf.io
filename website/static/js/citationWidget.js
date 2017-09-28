@@ -23,7 +23,6 @@ var formatSelection = function(state) {
 };
 
 // Public API
-
 function CitationWidget(inputSelector, displaySelector) {
     this.$input = $(inputSelector || '#citationStyleInput');
     this.$citationElement = $(displaySelector || '#citationText');
@@ -32,12 +31,13 @@ function CitationWidget(inputSelector, displaySelector) {
 
 CitationWidget.prototype.init = function() {
     var self = this;
+
     // Initialize select2 for selecting citation style
     self.$input.select2({
         allowClear: true,
         formatResult: formatResult,
         formatSelection: formatSelection,
-        placeholder: 'Citation Style (e.g. "APA")',
+        placeholder: 'Enter citation style (e.g. "APA")',
         minimumInputLength: 1,
         ajax: {
             url: '/api/v1/citations/styles/',
@@ -55,13 +55,15 @@ CitationWidget.prototype.init = function() {
             cache: true
         }
     }).on('select2-selecting', function(event) {
-        var styleUrl = '/static/vendor/bower_components/styles/' + event.val + '.csl';
+        var custom = ctx.customCitations[event.val];
+        var styleUrl = custom ? '/static/' + custom + '.csl' : '/static/vendor/bower_components/styles/' + event.val + '.csl';
         var styleRequest = $.get(styleUrl);
         var citationRequest = $.get(ctx.node.urls.api + 'citation/');
         $.when(styleRequest, citationRequest).done(function(style, data) {
-            var citeproc = citations.makeCiteproc(style[0], data[0], 'text');
+            var citeproc = citations.makeCiteproc(style[0], data[0], 'html');
             var items = citeproc.makeBibliography()[1];
-            self.$citationElement.text(items[0]).slideDown();
+            /* the safety of this was discussed with JIRA ticket OSF-4889 */
+            self.$citationElement.html(items[0]).slideDown();
         }).fail(function(jqxhr, status, error) {
             $osf.growl(
                 'Citation render failed',
@@ -69,16 +71,17 @@ CitationWidget.prototype.init = function() {
                 'danger'
             );
             Raven.captureMessage('Unexpected error when fetching citation', {
-                url: styleUrl,
-                citationStyle: event.val,
-                status: status,
-                error: error
+                extra: {
+                    url: styleUrl,
+                    citationStyle: event.val,
+                    status: status,
+                    error: error
+                }
             });
         });
     }).on('select2-removed', function(e) {
         self.$citationElement.slideUp().text();
     });
-
 };
 
 module.exports = CitationWidget;

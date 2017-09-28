@@ -1,103 +1,91 @@
+<%def name="nav(service_name, service_url, service_support_url)">
+<link rel="stylesheet" href='/static/css/nav.css'>
 <div class="osf-nav-wrapper">
-<nav class="navbar osf-navbar navbar-fixed-top" id="navbarScope" role="navigation">
+
+<nav class="navbar navbar-inverse navbar-fixed-top" id="navbarScope" role="navigation">
     <div class="container">
         <div class="navbar-header">
-            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+            <button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#secondary-navigation" aria-label="Toggle secondary navigation"}}>
                 <span class="sr-only">Toggle navigation</span>
-                <span class="fa fa-bars fa-lg fa-inverse"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
             </button>
-            <!-- ko ifnot: onSearchPage -->
-            <span class="visible-xs" data-bind="click : toggleSearch, css: searchCSS">
-                <a class="osf-xs-search pull-right" >
-                  <span rel="tooltip" data-placement="bottom" title="Search OSF" class="fa fa-search fa-lg fa-inverse" ></span>
-                </a>
-            </span>
-            <!-- /ko -->
-            <a class="navbar-brand visible-lg" href="/"><img src="/static/img/cos-white2.png" class="osf-navbar-logo" width="27" alt="COS logo"/> Open Science Framework <span class="brand-version"> BETA</span></a>
-            <a class="navbar-brand hidden-lg" href="/"><img src="/static/img/cos-white2.png" class="osf-navbar-logo" width="27" alt="COS logo"/> OSF</a>
+        <a class="navbar-brand" href="/" aria-label="Go home"><span class="osf-navbar-logo"></span></a>
+        <div class="service-name">
+            <a href="${service_url}">
+                <span class="hidden-xs"> OSF </span>
+                <span class="current-service"><strong>${service_name}</strong></span>
+            </a>
+        </div>
+        <div class="dropdown primary-nav">
+            <button data-bind="click: trackClick.bind($data, 'Dropdown Arrow')" id="primary-navigation" class="dropdown-toggle btn-link" data-toggle="dropdown" role="button" aria-expanded="false" aria-label="Toggle primary navigation">
+                <span class="fa fa-caret-down fa-2x"></span>
+            </button>
+            <ul class="dropdown-menu service-dropdown" role="menu">
+                <li><a data-bind="click: trackClick.bind($data, 'Home')" href="${domain}">OSF<b>HOME</b></a></li>
+                <li><a data-bind="click: trackClick.bind($data, 'Preprints')" href="${domain}preprints/">OSF<b>PREPRINTS</b></a></li>
+                <li><a data-bind="click: trackClick.bind($data, 'Registries')" href="${domain}registries/">OSF<b>REGISTRIES</b></a></li>
+                <li><a data-bind="click: trackClick.bind($data, 'Meetings')" href="${domain}meetings/">OSF<b>MEETINGS</b></a></li>
+            </ul>
+        </div>
+    </div>
+    <div id="navbar" class="navbar-collapse collapse navbar-right">
+        <ul class="nav navbar-nav"></ul>
+    </div><!--/.navbar-collapse -->
 
-        </div><!-- end navbar-header -->
-        <div class="collapse navbar-collapse navbar-ex1-collapse">
-            <ul class="nav navbar-nav navbar-mid">
-                <li class="visible-xs"><a href="/">Home</a></li>
+    <div class="navbar-collapse collapse navbar-right" id="secondary-navigation">
+        <ul class="nav navbar-nav">
+            % if service_name == 'HOME':
                 % if user_name:
-                <li><a href="${web_url_for('dashboard')}">My Dashboard</a></li>
+                    <li><a data-bind="click: trackClick.bind($data, 'MyProjects')" href="${domain}myprojects/">My Projects</a></li>
                 % endif
-                <li class="dropdown">
-                    <a href="#" class="dropdown-toggle" data-toggle="dropdown">Explore <b class="caret"></b></a>
-                    <ul class="dropdown-menu">
-                        <li><a href="/search/?q=*&filter=registration">Registry</a></li>
-                        <li><a href="/meetings/">Meetings</a></li>
-                        <li><a href="/explore/activity/">Public Activity</a></li>
-                    </ul><!-- end dropdown-menu -->
-                </li><!-- end dropdown -->
-                <li class="dropdown">
-                    <a href="#" class="dropdown-toggle" data-toggle="dropdown">Help <b class="caret"></b></a>
-                    <ul class="dropdown-menu">
-                        <li><a href="/4znZP/wiki/home">About</a></li>
-                        <li><a href="/faq/">FAQ</a></li>
-                        <li><a href="/getting-started">Getting Started</a></li>
-                        <li><script type="text/javascript">document.write("<n uers=\"znvygb:fhccbeg@bfs.vb\" ery=\"absbyybj\">Rznvy Fhccbeg</n>".replace(/[a-zA-Z]/g,function(e){return String.fromCharCode((e<="Z"?90:122)>=(e=e.charCodeAt(0)+13)?e:e-26)}));</script><noscript>Email Support: <span class="obfuscated-email-noscript"><strong><u>supp<span style="display:none;">null</span>ort@<span style="display:none;">null</span>osf.<span style="display:none;">null</span>io</u></strong></span></noscript></li>
-                        <li><script type="text/javascript">document.write("<n uers=\"znvygb:pbagnpg@bfs.vb\" ery=\"absbyybj\">Pbagnpg</n>".replace(/[a-zA-Z]/g,function(e){return String.fromCharCode((e<="Z"?90:122)>=(e=e.charCodeAt(0)+13)?e:e-26)}));</script><noscript>Contact OSF: <span class="obfuscated-email-noscript"><strong><u>cont<span style="display:none;">null</span>act@<span style="display:none;">null</span>osf.<span style="display:none;">null</span>io</u></strong></span></noscript></li>
-                    </ul><!-- end dropdown-menu -->
-                </li><!-- end dropdown -->
-            </ul><!-- end nav navbar-nav -->
-            <ul class="nav navbar-nav navbar-right">
-                <!-- ko ifnot: onSearchPage -->
-                <li class="hidden-xs" data-bind="click : toggleSearch, css: searchCSS">
-                    <a class="" >
-                        <span rel="tooltip" data-placement="bottom" title="Search OSF" class="fa fa-search fa-lg" ></span>
-                    </a>
+                    <li><a data-bind="click: trackClick.bind($data, 'Search')" href="${domain}search/">Search</a></li>
+            % endif
+            <li class="dropdown">
+            <a data-bind="click: trackClick.bind($data, '${service_name} Support')" href="${service_support_url}">Support</a>
+            </li>
+            <li class="navbar-donate-button"><a data-bind="click: trackClick.bind($data, 'Donate')" href="https://cos.io/donate">Donate</a></li>
+            % if user_name and display_name:
+            <li class="dropdown">
+            <button class="dropdown-toggle nav-user-dropdown btn-link" data-toggle="dropdown" role="button" aria-expanded="false" aria-label="Toggle auth dropdown">
+                <span class="osf-gravatar">
+                    <img src="${user_gravatar}" alt="User gravatar">
+                </span> ${display_name}
+                <span class="caret"></span>
+            </button>
+
+            <ul class="dropdown-menu auth-dropdown" role="menu">
+                <li><a data-bind="click: trackClick.bind($data, 'MyProfile')" href="${domain}profile/"><i class="fa fa-user fa-lg p-r-xs"></i> My Profile</a></li>
+                <li><a data-bind="click: trackClick.bind($data, 'Support')" href="${domain}support/" ><i class="fa fa-life-ring fa-lg p-r-xs"></i> OSF Support</a></li>
+                <li><a data-bind="click: trackClick.bind($data, 'Settings')" href="${web_url_for('user_profile')}"><i class="fa fa-cog fa-lg p-r-xs"></i> Settings</a></li>
+                <li><a data-bind="click: trackClick.bind($data, 'Logout')" href="${web_url_for('auth_logout')}"><i class="fa fa-sign-out fa-lg p-r-xs"></i> Log out</a></li>
+            </ul>
+            </li>
+            % elif allow_login:
+                %if institution:
+                    <li class="dropdown sign-in">
+                    <div class="btn-group">
+                        <a href="${domain}login/?campaign=institution&redirect_url=${redirect_url}">
+                            <button type="button" class="btn btn-info btn-top-login">
+                            Sign in <span class="hidden-xs"><i class="fa fa-arrow-right"></i></span>
+                            </button>
+                        </a>
+                    </div>
+                    </li>
+                %else :
+                <li class="dropdown sign-in">
+                    <div class="col-sm-12">
+                        <a data-bind="click: trackClick.bind($data, 'SignUp')" href="${web_url_for('auth_register')}" class="btn btn-success btn-top-signup m-r-xs">Sign Up</a>
+                        <a data-bind="click: trackClick.bind($data, 'SignIn')" href="${login_url}" class="btn btn-info btn-top-login p-sm">Sign In</a>
+                    </div>
                 </li>
-                <!-- /ko -->
-                % if user_name and display_name:
-                <li>
-                    <a class="hidden-lg hidden-xs" href="/profile/">
-                        <span rel="tooltip" data-placement="bottom" title="${user_name}" class="osf-gravatar"><img src="${user_gravatar}" alt="User gravatar"/> </span>
-                    </a>
-                    <a class="visible-lg visible-xs" href="/profile/">
-                        <span rel="tooltip" data-placement="bottom" title="${user_name}"><span class="osf-gravatar"> <img src="${user_gravatar}" alt="User gravatar"/> </span> ${display_name}</span>
-                    </a>
-                </li>
-                <li>
-                    <a href="${web_url_for('user_profile')}">
-                        <span rel="tooltip" data-placement="bottom" title="Settings" class="fa fa-cog hidden-xs fa-lg"></span>
-                        <span class="visible-xs">Settings</span>
-                    </a>
-                </li>
-                <li>
-                    <a href="${web_url_for('auth_logout')}">
-                        <span rel="tooltip" data-placement="bottom" title="Log&nbsp;out" class="fa fa-sign-out hidden-xs fa-lg"></span>
-                        <span class="visible-xs">Log out</span>
-                    </a>
-                </li>
-                % elif allow_login:
-                <li data-bind="with: $root.signIn">
-                    <form
-                            id="signInForm"
-                            class="navbar-form navbar-right"
-                            data-bind="submit: submit"
-                            action="${login_url}"
-                            method="POST"
-                        >
-                        <div class="form-group">
-                            <input type="email" class="input-sm form-control" data-bind="value: username" name="username" placeholder="Email" aria-label="Username">
-                        </div>
-                        <div class="form-group">
-                            <input type="password" class="input input-sm form-control" data-bind="value: password" name="password" placeholder="Password" aria-label="Password">
-                        </div>
-                        <button type="submit" class="btn btn-sm btn-success">Sign In</button>
-                    </form>
-                </li>
-                <li>
-                    <a href="${web_url_for('forgot_password_get')}">Forgot Password?</a>
-                </li>
-                % endif
-            </ul><!-- end nav navbar-nav navbar-right -->
-        </div><!-- end navbar-collapse -->
-    </div><!-- end container-->
-</nav>
-    <!-- ko ifnot: onSearchPage -->
-        <%include file='./search_bar.mako' />
-    <!-- /ko -->
+                %endif
+            % endif
+
+        </ul>
+    </div>
 </div>
+</nav>
+</div>
+</%def>

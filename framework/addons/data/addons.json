@@ -26,8 +26,8 @@
                 "text": "Forking a project or component does not copy Github authorization unless the user forking the project is the same user who authorized the Github add-on in the source project being forked."
             },
             "Registering": {
-                "status": "none",
-                "text": "GitHub content cannot be registered."
+                "status": "partial",
+                "text": "GitHub content will be registered, but version history will not be copied to the registration."
             }
         },
         "Amazon S3": {
@@ -56,8 +56,8 @@
                 "text": "Forking a project or component does not copy S3 authorization unless the user forking the project is the same user who authorized the S3 add-on in the source project being forked."
             },
             "Registering": {
-                "status": "none",
-                "text": "S3 content cannot be registered."
+                "status": "partial",
+                "text": "S3 content will be registered, but version history will not be copied to the registration."
             }
         },
         "figshare": {
@@ -67,15 +67,15 @@
             },
             "View / download file versions": {
                 "status": "partial",
-                "text": "figshare content can be viewed and downloaded via OSF provided it is \"published\" on figshare."
+                "text": "figshare files can be viewed/downloaded via OSF, but version history is not supported."
             },
             "Add / update files": {
                 "status": "partial",
                 "text": "Files can be added but not updated."
             },
             "Delete files": {
-                "status": "none",
-                "text": "figshare files cannot be deleted via OSF."
+                "status": "partial",
+                "text": "Private files and filesets can be deleted via OSF."
             },
             "Logs": {
                 "status": "partial",
@@ -86,8 +86,8 @@
                 "text": "Forking a project or component does not copy figshare authorization unless the user forking the project is the same user who authorized the figshare add-on in the source project being forked."
             },
             "Registering": {
-                "status": "none",
-                "text": "figshare content cannot be registered."
+                "status": "partial",
+                "text": "figshare content will be registered, but version history will not be copied to the registration."
             }
         },
         "Dropbox": {
@@ -116,14 +116,14 @@
                 "text": "Forking a project or component does not copy Dropbox authorization unless the user forking the project is the same user who authorized the Dropbox add-on in the source project being forked."
             },
             "Registering": {
-                "status": "none",
-                "text": "Dropbox content cannot be registered."
+                "status": "partial",
+                "text": "Dropbox content will be registered, but version history will not be copied to the registration."
             }
         },
         "Dataverse": {
             "Permissions": {
                 "status": "partial",
-                "text": "Making an OSF project public or private is independent of making a Dataverse study public or private, although the OSF can only access public studies on released Dataverses. The OSF allows you to release the latest draft version of a Dataverse study."
+                "text": "Making an OSF project public or private is independent of making a Dataverse study public or private. The OSF allows you to release the latest draft version of a Dataverse dataset."
             },
             "View / download file versions": {
                 "status": "partial",
@@ -146,8 +146,8 @@
                 "text": "Forking a project or component does not copy Dataverse authorization unless the user forking the project is the same user who authorized the Dataverse add-on in the source project being forked."
             },
             "Registering": {
-                "status": "none",
-                "text": "Dataverse content cannot be registered."
+                "status": "partial",
+                "text": "Dataverse content will be registered, but version history will not be copied to the registration."
             }
         },
         "Google Drive": {
@@ -176,8 +176,8 @@
                 "text": "Forking a project or component does not copy Google Drive authorization unless the user forking the project is the same user who authorized the Google Drive add-on in the source project being forked."
             },
             "Registering": {
-                "status": "none",
-                "text": "Google Drive content cannot be registered."
+                "status": "partial",
+                "text": "Google Drive content will be registered, but version history will not be copied to the registration."
             }
         },
         "Box": {
@@ -206,8 +206,8 @@
                 "text": "Forking a project or component does not copy Box authorization unless the user forking the project is the same user who authorized the Box add-on in the source project being forked."
             },
             "Registering": {
-                "status": "none",
-                "text": "Box content cannot be registered."
+                "status": "partial",
+                "text": "Box content will be registered, but version history will not be copied to the registration."
             }
         },
         "Mendeley": {
@@ -233,7 +233,37 @@
             },
             "Registering": {
                 "status": "none",
-                "text": "Mendeley content cannot be registered."
+                "text": "Mendeley content will not be registered."
+            }
+        },
+        "ownCloud": {
+            "Permissions": {
+                "status": "partial",
+                "text": "Making an OSF project public or private is independent of ownCloud privacy. The OSF does not alter the permissions of linked ownCloud folders."
+            },
+            "View / download file versions": {
+                "status": "partial",
+                "text": "ownCloud files can be viewed/downloaded via OSF, but version history is not supported by the ownCloud WebDAV API."
+            },
+            "Add / update files": {
+                "status": "full",
+                "text": "Adding/updating files in the project via OSF will be reflected in ownCloud."
+            },
+            "Delete files": {
+                "status": "full",
+                "text": "Files deleted via OSF will be deleted in ownCloud."
+            },
+            "Logs": {
+                "status": "partial",
+                "text": "OSF keeps track of changes you make to your ownCloud content through OSF, but not for changes made using ownCloud directly."
+            },
+            "Forking": {
+                "status": "partial",
+                "text": "Forking a project or component does not copy ownCloud authorization unless the user forking the project is the same user who authorized the ownCloud add-on in the source project being forked."
+            },
+            "Registering": {
+                "status": "partial",
+                "text": "ownCloud content will be registered, but version history will not be copied to the registration."
             }
         },
         "Zotero": {
@@ -259,7 +289,37 @@
             },
             "Registering": {
                 "status": "none",
-                "text": "Zotero content cannot be registered."
+                "text": "Zotero content will not be registered."
+            }
+        },
+        "Bitbucket": {
+            "Permissions": {
+                "status": "partial",
+                "text": "Making an OSF project public or private is independent of making a Bitbucket repo public or private. The OSF does not alter the permissions of linked Bitbucket repos."
+            },
+            "View / download file versions": {
+                "status": "full",
+                "text": "Bitbucket files and their versions can be viewed/downloaded via OSF."
+            },
+            "Add / update files": {
+                "status": "none",
+                "text": "Bitbucket does not support adding or updating files via their API."
+            },
+            "Delete files": {
+                "status": "none",
+                "text": "Bitbucket does not support deleting files via their API."
+            },
+            "Logs": {
+                "status": "full",
+                "text": "OSF keeps track of changes you make to your Bitbucket content through OSF, but not for changes made using Bitbucket directly."
+            },
+            "Forking": {
+                "status": "partial",
+                "text": "Forking a project or component does not copy Bitbucket authorization unless the user forking the project is the same user who authorized the Bitbucket add-on in the source project being forked."
+            },
+            "Registering": {
+                "status": "partial",
+                "text": "Bitbucket content will be registered, but version history will not be copied to the registration."
             }
         }
     },

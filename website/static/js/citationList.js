@@ -2,8 +2,10 @@
 
 var $ = require('jquery');
 var ko = require('knockout');
+require('knockout.validation');
 var $osf = require('./osfHelpers');
 var citations = require('./citations');
+var bootbox = require('bootbox');
 
 var BASE_URL = '/static/vendor/bower_components/styles/';
 var STYLES = {
@@ -20,9 +22,11 @@ var formatCitation = function(style, data, format) {
 };
 
 var ViewModel = function() {
-    this.apa = ko.observable();
-    this.mla = ko.observable();
-    this.chicago = ko.observable();
+    var self = this;
+
+    self.apa = ko.observable();
+    self.mla = ko.observable();
+    self.chicago = ko.observable();
 };
 
 ViewModel.prototype.fetch = function() {

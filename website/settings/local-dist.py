@@ -9,15 +9,50 @@ from . import defaults
 
 DEV_MODE = True
 DEBUG_MODE = True  # Sets app to debug mode, turns off template caching, etc.
+SECURE_MODE = not DEBUG_MODE  # Disable osf cookie secure
+
+# NOTE: Internal Domains/URLs have been added to facilitate docker development environments
+#       when localhost inside a container != localhost on the client machine/docker host.
+
+PROTOCOL = 'https://' if SECURE_MODE else 'http://'
+DOMAIN = PROTOCOL + 'localhost:5000/'
+INTERNAL_DOMAIN = DOMAIN
+API_DOMAIN = PROTOCOL + 'localhost:8000/'
+
+#WATERBUTLER_URL = 'http://localhost:7777'
+#WATERBUTLER_INTERNAL_URL = WATERBUTLER_URL
+
+LIVE_RELOAD_DOMAIN = 'http://localhost:4200'
+PREPRINT_PROVIDER_DOMAINS = {
+    'enabled': False,
+    'prefix': 'http://local.',
+    'suffix': ':4200/'
+}
+USE_EXTERNAL_EMBER = True
+PROXY_EMBER_APPS = False
+EXTERNAL_EMBER_APPS = {
+    'preprints': {
+        'url': '/preprints/',
+        'server': 'http://192.168.168.167:4200/',
+        'path': '/preprints/'
+    },
+    'registries': {
+        'url': '/registries/',
+        'server': 'http://192.168.168.167:4300',
+        'path': '/registries/'
+    }
+    # 'meetings': {
+    #     'url': '/meetings/',
+    #     'server': 'http://localhost:4201',
+    #     'path': '../osf-meetings/dist/'
+    # },
+}
 
 SEARCH_ENGINE = 'elastic'
 ELASTIC_TIMEOUT = 10
 
 # Comment out to use celery in development
 USE_CELERY = False
-
-# Comment out to use GnuPG in development
-USE_GNUPG = False  # Changing this may require you to re-enter encrypted fields
 
 # Email
 USE_EMAIL = False
@@ -30,10 +65,11 @@ ENABLE_EMAIL_SUBSCRIPTIONS = False
 
 # Session
 COOKIE_NAME = 'osf'
-SECRET_KEY = "CHANGEME"
-
-# Uncomment if GPG was installed with homebrew
-# GNUPG_BINARY = '/usr/local/bin/gpg'
+OSF_COOKIE_DOMAIN = None
+SECRET_KEY = 'CHANGEME'
+SESSION_COOKIE_SECURE = SECURE_MODE
+OSF_SERVER_KEY = None
+OSF_SERVER_CERT = None
 
 ##### Celery #####
 ## Default RabbitMQ broker

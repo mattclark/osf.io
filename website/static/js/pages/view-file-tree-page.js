@@ -11,27 +11,22 @@ $(document).ready(function() {
     })
     .done(function (data) {
         new fileBrowser(data);
+        $('#sharebutton').removeClass('disabled');
     });
 
-    //TODO: Refactor to remove duplication with the wiki menu panel
     var panelToggle = $('.panel-toggle');
     var panelExpand = $('.panel-expand');
-    $('.panel-collapse').on('click', function () {
-        var panelHeight = $('.osf-panel.hidden-xs').height();
-        var el = $(this).closest('.panel-toggle');
-        el.children('.osf-panel.hidden-xs').hide();
-        panelToggle.removeClass('col-md-3').addClass('col-md-1');
-        panelExpand.removeClass('col-md-6').addClass('col-md-8');
-        el.children('.panel-collapsed').show();
-        el.children('.panel-collapsed').css('height', panelHeight);
+    var panelVisible = panelToggle.find('.osf-panel-hide');
+    var panelHidden = panelToggle.find('.osf-panel-show');
+
+    $('.osf-panel-show .tb-header-row').on('click', function () {
+        panelToggle.removeClass('col-sm-1').addClass('col-sm-3');
+        panelExpand.removeClass('col-sm-11').addClass('col-sm-9');
+
+        panelVisible.show();
+        panelHidden.hide();
     });
-    $('.panel-collapsed .osf-panel-header').on('click', function () {
-        var el = $(this).parent();
-        var toggle = el.closest('.panel-toggle');
-        toggle.children('.osf-panel').show();
-        el.hide();
-        panelToggle.removeClass('col-md-1').addClass('col-md-3');
-        panelExpand.removeClass('col-md-8').addClass('col-md-6');
-    });
+    // TODO: This is a hack to highlight the "Files" tab. Rethink.
+    $('.osf-project-navbar li#projectNavFiles').addClass('active');
 
 });

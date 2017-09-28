@@ -6,11 +6,10 @@ from framework import sentry
 from framework.auth.decorators import must_be_logged_in
 from framework.exceptions import HTTPError
 
+from osf.models import AbstractNode, NotificationSubscription
 from website.notifications import utils
 from website.notifications.constants import NOTIFICATION_TYPES
-from website.notifications.model import NotificationSubscription
 from website.project.decorators import must_be_valid_project
-from website.project.model import Node
 
 
 @must_be_logged_in
@@ -22,7 +21,15 @@ def get_subscriptions(auth):
 @must_be_valid_project
 def get_node_subscriptions(auth, **kwargs):
     node = kwargs.get('node') or kwargs['project']
-    return utils.format_data(auth.user, [node._id])
+    return utils.format_data(auth.user, [node])
+
+
+@must_be_logged_in
+def get_file_subscriptions(auth, **kwargs):
+    node_id = request.args.get('node_id')
+    path = request.args.get('path')
+    provider = request.args.get('provider')
+    return utils.format_file_subscription(auth.user, node_id, path, provider)
 
 
 @must_be_logged_in
@@ -32,13 +39,18 @@ def configure_subscription(auth):
     target_id = json_data.get('id')
     event = json_data.get('event')
     notification_type = json_data.get('notification_type')
+    path = json_data.get('path')
+    provider = json_data.get('provider')
 
     if not event or (notification_type not in NOTIFICATION_TYPES and notification_type != 'adopt_parent'):
         raise HTTPError(http.BAD_REQUEST, data=dict(
-            message_long="Must provide an event and notification type for subscription.")
+            message_long='Must provide an event and notification type for subscription.')
         )
 
-    node = Node.load(target_id)
+    node = AbstractNode.load(target_id)
+    if 'file_updated' in event and path is not None and provider is not None:
+        wb_path = path.lstrip('/')
+        event = wb_path + '_file_updated'
     event_id = utils.to_subscription_key(target_id, event)
 
     if not node:
@@ -64,13 +76,16 @@ def configure_subscription(auth):
         if notification_type != 'adopt_parent':
             owner = node
         else:
-            parent = node.parent_node
-            if not parent:
-                sentry.log_message(
-                    '{!r} attempted to adopt_parent of '
-                    'the parentless project, {!r}'.format(user, node)
-                )
-                raise HTTPError(http.BAD_REQUEST)
+            if 'file_updated' in event and len(event) > len('file_updated'):
+                pass
+            else:
+                parent = node.parent_node
+                if not parent:
+                    sentry.log_message(
+                        '{!r} attempted to adopt_parent of '
+                        'the parentless project, {!r}'.format(user, node)
+                    )
+                    raise HTTPError(http.BAD_REQUEST)
 
             # If adopt_parent make sure that this subscription is None for the current User
             subscription = NotificationSubscription.load(event_id)
@@ -84,6 +99,11 @@ def configure_subscription(auth):
 
     if not subscription:
         subscription = NotificationSubscription(_id=event_id, owner=owner, event_name=event)
+        subscription.save()
+
+    if node and node._id not in user.notifications_configured:
+        user.notifications_configured[node._id] = True
+        user.save()
 
     subscription.add_user_to_subscription(user, notification_type)
 

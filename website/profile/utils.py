@@ -1,52 +1,44 @@
 # -*- coding: utf-8 -*-
-import framework
-from website.util.permissions import reduce_permissions
-from website.filters import gravatar
+from framework import auth
+
 from website import settings
-
-from modularodm import Q
-
-def get_projects(user):
-    '''Return a list of user's projects, excluding registrations and folders.'''
-    return list(user.node__contributed.find(
-        (
-            Q('category', 'eq', 'project') &
-            Q('is_registration', 'eq', False) &
-            Q('is_deleted', 'eq', False) &
-            Q('is_folder', 'eq', False)
-        )
-    ))
-
-def get_public_projects(user):
-    '''Return a list of a user's public projects.'''
-    return [p for p in get_projects(user) if p.is_public]
+from website.filters import gravatar
+from osf.models import Contributor
+from osf.models.contributor import get_contributor_permissions
+from website.util.permissions import reduce_permissions
 
 
 def get_gravatar(user, size=None):
     if size is None:
-        size = settings.GRAVATAR_SIZE_PROFILE
+        size = settings.PROFILE_IMAGE_LARGE
     return gravatar(
         user, use_ssl=True,
         size=size
     )
 
 
-def serialize_user(user, node=None, admin=False, full=False):
-    """Return a dictionary representation of a registered user.
+def serialize_user(user, node=None, admin=False, full=False, is_profile=False, include_node_counts=False):
+    """
+    Return a dictionary representation of a registered user.
 
     :param User user: A User object
     :param bool full: Include complete user properties
     """
+    from website.project.utils import PROJECT_QUERY
+    contrib = None
+    if isinstance(user, Contributor):
+        contrib = user
+        user = contrib.user
     fullname = user.display_full_name(node=node)
     ret = {
-        'id': str(user._primary_key),
+        'id': str(user._id),
         'registered': user.is_registered,
         'surname': user.family_name,
         'fullname': fullname,
-        'shortname': fullname if len(fullname) < 50 else fullname[:23] + "..." + fullname[-23:],
+        'shortname': fullname if len(fullname) < 50 else fullname[:23] + '...' + fullname[-23:],
         'gravatar_url': gravatar(
             user, use_ssl=True,
-            size=settings.GRAVATAR_SIZE_ADD_CONTRIBUTOR
+            size=settings.PROFILE_IMAGE_MEDIUM
         ),
         'active': user.is_active,
     }
@@ -57,9 +49,10 @@ def serialize_user(user, node=None, admin=False, full=False):
                 'permission': 'read',
             }
         else:
+            is_contributor_obj = isinstance(contrib, Contributor)
             flags = {
-                'visible': user._id in node.visible_contributor_ids,
-                'permission': reduce_permissions(node.get_permissions(user)),
+                'visible': contrib.visible if is_contributor_obj else node.contributor_set.filter(user=user, visible=True).exists(),
+                'permission': get_contributor_permissions(contrib, as_list=False) if is_contributor_obj else reduce_permissions(node.get_permissions(user)),
             }
         ret.update(flags)
     if user.is_registered:
@@ -67,25 +60,26 @@ def serialize_user(user, node=None, admin=False, full=False):
             'url': user.url,
             'absolute_url': user.absolute_url,
             'display_absolute_url': user.display_absolute_url,
-            'date_registered': user.date_registered.strftime("%Y-%m-%d"),
+            'date_registered': user.date_registered.strftime('%Y-%m-%d'),
         })
 
     if full:
         # Add emails
-        ret['emails'] = [
-            {
-                'address': each,
-                'primary': each == user.username,
-                'confirmed': True,
-            } for each in user.emails
-        ] + [
-            {
-                'address': each,
-                'primary': each == user.username,
-                'confirmed': False
-            }
-            for each in user.unconfirmed_emails
-        ]
+        if is_profile:
+            ret['emails'] = [
+                {
+                    'address': each,
+                    'primary': each.strip().lower() == user.username.strip().lower(),
+                    'confirmed': True,
+                } for each in user.emails.values_list('address', flat=True)
+            ] + [
+                {
+                    'address': each,
+                    'primary': each.strip().lower() == user.username.strip().lower(),
+                    'confirmed': False
+                }
+                for each in user.get_unconfirmed_emails_exclude_external_identity()
+            ]
 
         if user.is_merged:
             merger = user.merged_by
@@ -96,17 +90,22 @@ def serialize_user(user, node=None, admin=False, full=False):
             }
         else:
             merged_by = None
+
         ret.update({
-            'number_projects': len(get_projects(user)),
-            'number_public_projects': len(get_public_projects(user)),
             'activity_points': user.get_activity_points(),
             'gravatar_url': gravatar(
                 user, use_ssl=True,
-                size=settings.GRAVATAR_SIZE_PROFILE
+                size=settings.PROFILE_IMAGE_LARGE
             ),
             'is_merged': user.is_merged,
             'merged_by': merged_by,
         })
+        if include_node_counts:
+            projects = user.nodes.filter(PROJECT_QUERY).get_roots()
+            ret.update({
+                'number_projects': projects.count(),
+                'number_public_projects': projects.filter(is_public=True).count(),
+            })
 
     return ret
 
@@ -118,8 +117,21 @@ def serialize_contributors(contribs, node, **kwargs):
     ]
 
 
-def add_contributor_json(user, current_user=None):
+def serialize_visible_contributors(node):
+    # This is optimized when node has .include('contributor__user__guids')
+    return [
+        serialize_user(c, node) for c in node.contributor_set.all() if c.visible
+    ]
 
+
+def add_contributor_json(user, current_user=None):
+    """
+    Generate a dictionary representation of a user, optionally including # projects shared with `current_user`
+
+    :param User user: The user object to serialize
+    :param User current_user : The user object for a different user, to calculate number of projects in common
+    :return dict: A dict representing the serialized user data
+    """
     # get shared projects
     if current_user:
         n_projects_in_common = current_user.n_projects_in_common(user)
@@ -137,7 +149,7 @@ def add_contributor_json(user, current_user=None):
 
     return {
         'fullname': user.fullname,
-        'email': user.username,
+        'email': user.email,
         'id': user._primary_key,
         'employment': current_employment,
         'education': education,
@@ -146,15 +158,15 @@ def add_contributor_json(user, current_user=None):
         'active': user.is_active,
         'gravatar_url': gravatar(
             user, use_ssl=True,
-            size=settings.GRAVATAR_SIZE_ADD_CONTRIBUTOR
+            size=settings.PROFILE_IMAGE_MEDIUM
         ),
         'profile_url': user.profile_url
     }
 
+
 def serialize_unregistered(fullname, email):
-    """Serializes an unregistered user.
-    """
-    user = framework.auth.get_user(email=email)
+    """Serializes an unregistered user."""
+    user = auth.get_user(email=email)
     if user is None:
         serialized = {
             'fullname': fullname,
@@ -162,7 +174,7 @@ def serialize_unregistered(fullname, email):
             'registered': False,
             'active': False,
             'gravatar': gravatar(email, use_ssl=True,
-                size=settings.GRAVATAR_SIZE_ADD_CONTRIBUTOR),
+                                 size=settings.PROFILE_IMAGE_MEDIUM),
             'email': email,
         }
     else:

@@ -1,3 +1,0 @@
-# OAuth app keys
-MENDELEY_CLIENT_ID = None
-MENDELEY_CLIENT_SECRET = None

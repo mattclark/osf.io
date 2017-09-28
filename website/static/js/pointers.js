@@ -14,12 +14,17 @@ var oop = require('js/oop');
 var nodeApiUrl = window.contextVars.node.urls.api;
 var nodeId = window.contextVars.node.id;
 
+var SEARCH_ALL_SUBMIT_TEXT = 'Search all projects';
+var SEARCH_MY_PROJECTS_SUBMIT_TEXT = 'Search my projects';
+
 var AddPointerViewModel = oop.extend(Paginator, {
     constructor: function(nodeTitle) {
         this.super.constructor.call(this);
         var self = this;
         this.nodeTitle = nodeTitle;
         this.submitEnabled = ko.observable(true);
+        this.searchAllProjectsSubmitText = ko.observable(SEARCH_ALL_SUBMIT_TEXT);
+        this.searchMyProjectsSubmitText = ko.observable(SEARCH_MY_PROJECTS_SUBMIT_TEXT);
 
         this.query = ko.observable();
         this.results = ko.observableArray();
@@ -27,6 +32,9 @@ var AddPointerViewModel = oop.extend(Paginator, {
         this.errorMsg = ko.observable('');
         this.totalPages = ko.observable(0);
         this.includePublic = ko.observable(true);
+        this.searchWarningMsg = ko.observable('');
+        this.submitWarningMsg = ko.observable('');
+        this.loadingResults = ko.observable(false);
 
         this.foundResults = ko.pureComputed(function() {
             return self.query() && self.results().length;
@@ -38,50 +46,82 @@ var AddPointerViewModel = oop.extend(Paginator, {
     },
     searchAllProjects: function() {
         this.includePublic(true);
+        this.pageToGet(0);
+        this.searchAllProjectsSubmitText('Searching...');
         this.fetchResults();
     },
     searchMyProjects: function() {
         this.includePublic(false);
+        this.pageToGet(0);
+        this.searchMyProjectsSubmitText('Searching...');
         this.fetchResults();
     },
     fetchResults: function() {
         var self = this;
         self.errorMsg('');
+        self.searchWarningMsg('');
+
         if (self.query()) {
+            self.results([]); // clears page for spinner
+            self.loadingResults(true); // enables spinner
+
             osfHelpers.postJSON(
                 '/api/v1/search/node/', {
                     query: self.query(),
                     nodeId: nodeId,
                     includePublic: self.includePublic(),
-                    page: self.currentPage()
+                    page: self.pageToGet()
                 }
             ).done(function(result) {
                 if (!result.nodes.length) {
                     self.errorMsg('No results found.');
+                } else {
+                    result.nodes.forEach(function(each) {
+                        if (each.isRegistration) {
+                            each.dateRegistered = new osfHelpers.FormattableDate(each.dateRegistered);
+                        } else {
+                            each.dateCreated = new osfHelpers.FormattableDate(each.dateCreated);
+                            each.dateModified = new osfHelpers.FormattableDate(each.dateModified);
+                        }
+                    });
                 }
                 self.results(result.nodes);
                 self.currentPage(result.page);
                 self.numberOfPages(result.pages);
                 self.addNewPaginators();
-            }).fail(
-                osfHelpers.handleJSONError
-            );
+            }).fail(function(xhr) {
+                self.searchWarningMsg(xhr.responseJSON && xhr.responseJSON.message_long);
+            }).always( function (){
+                self.searchAllProjectsSubmitText(SEARCH_ALL_SUBMIT_TEXT);
+                self.searchMyProjectsSubmitText(SEARCH_MY_PROJECTS_SUBMIT_TEXT);
+                self.loadingResults(false);
+            });
         } else {
             self.results([]);
             self.currentPage(0);
             self.totalPages(0);
+            self.searchAllProjectsSubmitText(SEARCH_ALL_SUBMIT_TEXT);
+            self.searchMyProjectsSubmitText(SEARCH_MY_PROJECTS_SUBMIT_TEXT);
         }
     },
-    addTips: function(elements) {
+    addTips: function(elements, data) {
         elements.forEach(function(element) {
-            $(element).find('.contrib-button').tooltip();
+            var titleText = '';
+            if (data.isRegistration) {
+                titleText = 'Registered: ' + data.dateRegistered.local;
+            } else {
+                titleText = 'Created: ' + data.dateCreated.local + '\nModified: ' + data.dateModified.local;
+            }
+            $(element).tooltip({
+                title: titleText
+            });
         });
     },
     add: function(data) {
         this.selection.push(data);
         // Hack: Hide and refresh tooltips
         $('.tooltip').hide();
-        $('.contrib-button').tooltip();
+        $('.pointer-row').tooltip();
     },
     remove: function(data) {
         var self = this;
@@ -90,7 +130,7 @@ var AddPointerViewModel = oop.extend(Paginator, {
         );
         // Hack: Hide and refresh tooltips
         $('.tooltip').hide();
-        $('.contrib-button').tooltip();
+        $('.pointer-row').tooltip();
     },
     addAll: function() {
         var self = this;
@@ -118,7 +158,10 @@ var AddPointerViewModel = oop.extend(Paginator, {
     submit: function() {
         var self = this;
         self.submitEnabled(false);
+        self.submitWarningMsg('');
+
         var nodeIds = osfHelpers.mapByProperty(self.selection(), 'id');
+
         osfHelpers.postJSON(
             nodeApiUrl + 'pointer/', {
                 nodeIds: nodeIds
@@ -127,13 +170,15 @@ var AddPointerViewModel = oop.extend(Paginator, {
             window.location.reload();
         }).fail(function(data) {
             self.submitEnabled(true);
-            osfHelpers.handleJSONError(data);
+            self.submitWarningMsg(data.responseJSON && data.responseJSON.message_long);
         });
     },
     clear: function() {
         this.query('');
         this.results([]);
         this.selection([]);
+        this.searchWarningMsg('');
+        this.submitWarningMsg('');
     },
     authorText: function(node) {
         var rv = node.firstAuthor;

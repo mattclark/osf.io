@@ -6,12 +6,16 @@
 var $ = require('jquery');
 var bootbox = require('bootbox');
 var Raven = require('raven-js');
+var ko = require('knockout');
+
 
 var $osf = require('js/osfHelpers');
-var LogFeed = require('js/logFeed.js');
 
 var ctx = window.contextVars;
 var NodeActions = {}; // Namespace for NodeActions
+require('loaders.css/loaders.min.css');
+require('css/add-project-plugin.css');
+
 
 // TODO: move me to the NodeControl or separate module
 NodeActions.beforeForkNode = function(url, done) {
@@ -19,33 +23,73 @@ NodeActions.beforeForkNode = function(url, done) {
         url: url,
         contentType: 'application/json'
     }).done(function(response) {
-        bootbox.confirm(
-            $osf.joinPrompts(response.prompts, 'Are you sure you want to fork this project?'),
-            function(result) {
+        bootbox.confirm({
+            message: $osf.joinPrompts(response.prompts, ('<h4>Are you sure you want to fork this project?</h4>')),
+            callback: function (result) {
                 if (result) {
                     done && done();
                 }
+            },
+            buttons:{
+                confirm:{
+                    label:'Fork'
+                }
             }
-        );
+        });
     }).fail(
         $osf.handleJSONError
     );
 };
 
+function afterForkGoto(url) {
+  bootbox.confirm({
+      message: '<h4 class="add-project-success text-success">Fork created successfully!</h4>',
+      callback: function(result) {
+          if(result) {
+              window.location = url;
+          }
+      },
+      buttons: {
+          confirm: {
+              label: 'Go to new fork',
+              className: 'btn-success'
+          },
+          cancel: {
+              label: 'Keep working here'
+          }
+      },
+      closeButton: false
+  });
+}
+
 NodeActions.forkNode = function() {
     NodeActions.beforeForkNode(ctx.node.urls.api + 'fork/before/', function() {
         // Block page
         $osf.block();
+        var payload = {
+            data: {
+                type: 'nodes'
+            }
+        };
         // Fork node
-        $osf.postJSON(
-            ctx.node.urls.api + 'fork/',
-            {}
+        var nodeType = ctx.node.isRegistration ? 'registrations' : 'nodes';
+        $osf.ajaxJSON(
+            'POST',
+            $osf.apiV2Url(nodeType + '/' + ctx.node.id + '/forks/'),
+            {
+                isCors: true,
+                data: payload
+            }
         ).done(function(response) {
-            window.location = response;
+            $osf.unblock();
+            afterForkGoto(response.data.links.html);
         }).fail(function(response) {
             $osf.unblock();
             if (response.status === 403) {
                 $osf.growl('Sorry:', 'you do not have permission to fork this project');
+            } else if (response.status === 504) {
+                $osf.growl('Sorry:', 'This is taking longer than normal. </br>' +
+                    'Please check back later to access your new fork and if still unavailable, contact support@cos.io');
             } else {
                 $osf.growl('Error:', 'Forking failed');
                 Raven.captureMessage('Error occurred during forking');
@@ -54,7 +98,7 @@ NodeActions.forkNode = function() {
     });
 };
 
-NodeActions.forkPointer = function(pointerId) {
+NodeActions.forkPointer = function(nodeId) {
     bootbox.confirm({
         title: 'Fork this project?',
         message: 'Are you sure you want to fork this project?',
@@ -66,13 +110,19 @@ NodeActions.forkPointer = function(pointerId) {
                 // Fork pointer
                 $osf.postJSON(
                     ctx.node.urls.api + 'pointer/fork/',
-                    {pointerId: pointerId}
-                ).done(function() {
-                    window.location.reload();
+                    {nodeId: nodeId}
+                ).done(function(response) {
+                    $osf.unblock();
+                    afterForkGoto(response.data.node.url);
                 }).fail(function() {
                     $osf.unblock();
                     $osf.growl('Error','Could not fork link.');
                 });
+            }
+        },
+        buttons:{
+            confirm:{
+                label:'Fork'
             }
         }
     });
@@ -82,18 +132,30 @@ NodeActions.beforeTemplate = function(url, done) {
     $.ajax({
         url: url,
         contentType: 'application/json'
-    }).success(function(response) {
-        bootbox.confirm(
-            $osf.joinPrompts(response.prompts,
-                ('Are you sure you want to create a new project using this project as a template? ' +
-                  'Any add-ons configured for this project will not be authenticated in the new project.')),
-            function (result) {
+    }).done(function(response) {
+        bootbox.confirm({
+            message: $osf.joinPrompts(response.prompts,
+                ('<h4>Are you sure you want to create a new project using this project as a template?</h4>' +
+                '<p>Any add-ons configured for this project will not be authenticated in the new project.</p>')),
+                //('Are you sure you want to create a new project using this project as a template? ' +
+                //  'Any add-ons configured for this project will not be authenticated in the new project.')),
+            callback: function (result) {
                 if (result) {
                     done && done();
                 }
+            },
+            buttons:{
+                confirm:{
+                    label:'Create'
+                }
             }
-        );
+        });
     });
+};
+
+NodeActions.redirectForkPage = function(){
+    window.location.href = '/project/' + ctx.node.id + '/forks/';
+    return true;
 };
 
 NodeActions.addonFileRedirect = function(item) {
@@ -116,61 +178,6 @@ NodeActions.useAsTemplate = function() {
         });
     });
 };
-
-
-$(function() {
-
-    $('#newComponent form').on('submit', function(e) {
-
-        $('#add-component-submit')
-            .attr('disabled', 'disabled')
-            .text('Adding');
-
-        if ($.trim($('#title').val()) === '') {
-
-            $('#alert').text('The new component title cannot be empty');
-
-            $('#add-component-submit')
-                .removeAttr('disabled', 'disabled')
-                .text('OK');
-
-            e.preventDefault();
-        } else if ($(e.target).find('#title').val().length > 200) {
-            $('#alert').text('The new component title cannot be more than 200 characters.');
-
-            $('#add-component-submit')
-                .removeAttr('disabled', 'disabled')
-                .text('OK');
-
-            e.preventDefault();
-
-        }
-    });
-});
-
-NodeActions._openCloseNode = function(nodeId) {
-
-    var icon = $('#icon-' + nodeId);
-    var body = $('#body-' + nodeId);
-
-    body.toggleClass('hide');
-
-    if (body.hasClass('hide')) {
-        icon.removeClass('fa fa-minus');
-        icon.addClass('fa fa-plus');
-        icon.attr('title', 'More');
-    } else {
-        icon.removeClass('fa fa-plus');
-        icon.addClass('fa fa-minus');
-        icon.attr('title', 'Less');
-    }
-
-    // Refresh tooltip text
-    icon.tooltip('destroy');
-    icon.tooltip();
-
-};
-
 
 NodeActions.reorderChildren = function(idList, elm) {
     $osf.postJSON(
@@ -198,36 +205,19 @@ NodeActions.removePointer = function(pointerId, pointerElm) {
     );
 };
 
-
-/*
-Display recent logs for for a node on the project view page.
-*/
-NodeActions.openCloseNode = function(nodeId) {
-    var $logs = $('#logs-' + nodeId);
-    if (!$logs.hasClass('active')) {
-        if (!$logs.hasClass('served')) {
-            $.getJSON(
-                $logs.attr('data-uri'),
-                {count: 3}
-            ).done(function(response) {
-                new LogFeed('#logs-' + nodeId, response.logs);
-                $logs.addClass('served');
-            });
-        }
-        $logs.addClass('active');
-    } else {
-        $logs.removeClass('active');
-    }
-    // Hide/show the html
-    NodeActions._openCloseNode(nodeId);
-};
-
 // TODO: remove this
 $(document).ready(function() {
     var permissionInfoHtml = '<dl>' +
-        '<dt>Read</dt><dd>View project content and comment</dd>' +
-        '<dt>Read + Write</dt><dd>Read privileges plus add and configure components; add and edit content</dd>' +
-        '<dt>Administrator</dt><dd>Read and write privileges; manage contributors; delete and register project; public-private settings</dd>' +
+        '<dt>Read</dt>' +
+            '<dd><ul><li>View project content and comment</li></ul></dd>' +
+        '<dt>Read + Write</dt>' +
+            '<dd><ul><li>Read privileges</li> ' +
+                '<li>Add and configure components</li> ' +
+                '<li>Add and edit content</li></ul></dd>' +
+        '<dt>Administrator</dt><dd><ul>' +
+            '<li>Read and write privileges</li>' +
+            '<li>Manage contributor</li>' +
+            '<li>Delete and register project</li><li>Public-private settings</li></ul></dd>' +
         '</dl>';
 
     $('.permission-info').attr(
@@ -262,6 +252,12 @@ $(document).ready(function() {
                     var pointerElm = $this.closest('.list-group-item');
                     NodeActions.removePointer(pointerId, pointerElm);
                 }
+            },
+            buttons:{
+                    confirm:{
+                        label:'Remove',
+                        className:'btn-danger'
+                    }
             }
         });
     });
@@ -277,9 +273,10 @@ $(document).ready(function() {
     });
 
     $('body').on('click', '.tagsinput .tag > span', function(e) {
-        window.location = '/search/?q=(tags:' + $(e.target).text().toString().trim()+ ')';
+      if(e){
+        window.location = '/search/?q=(tags:"' + $(e.target).text().toString().trim()+ '")';
+      }
     });
-
 
     // Portlet feature for the dashboard, to be implemented in later versions.
     // $( ".osf-dash-col" ).sortable({
@@ -292,7 +289,7 @@ $(document).ready(function() {
     // Adds active class to current menu item
     $(function () {
         var path = window.location.pathname;
-        $('.project-nav a').each(function () {
+        $('.project-nav a:not(#commentsLink)').each(function () {
             var href = $(this).attr('href');
             if (path === href ||
                (path.indexOf('files') > -1 && href.indexOf('files') > -1) ||
@@ -300,6 +297,14 @@ $(document).ready(function() {
                 $(this).closest('li').addClass('active');
             }
         });
+
+        // Remove Comments link from project nav bar for pages not bound to the comment view model
+        var commentsLinkElm = document.getElementById('commentsLink');
+        if (commentsLinkElm) {
+            if(!ko.dataFor(commentsLinkElm)) {
+                commentsLinkElm.parentNode.removeChild(commentsLinkElm);
+            }
+        }
     });
 });
 

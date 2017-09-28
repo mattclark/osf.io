@@ -18,17 +18,34 @@ describe('koHelpers', () => {
         });
     });
 
+    describe('fitTextHelper', () => {
+        it('correctly processes various strings', () => {
+            // Test the underlying method; adapted from https://github.com/mbest/knockout.punches/blob/master/spec/textFilterSpec.js#L78
+            var cases = [
+                [{text: 'someText', length: 8}, 'someText'],
+                [{text: 'someText', length: 7}, 'some...'],
+                [{text: 'someText', length: 7, replacement: '!'}, 'someTe!'],
+                [{text: 'someText', length: 7, trimWhere: 'left'}, '...Text'],
+                [{text: 'someText', length: 7, trimWhere: 'middle'}, 'so...xt']
+            ];
+            cases.forEach(([{text, length, replacement, trimWhere}, expectedResult]) => {
+                let actualResult = koHelpers._fitHelper(text, length, replacement, trimWhere);
+                assert.equal(actualResult, expectedResult, text + ' is truncated correctly');
+            });
+        });
+    });
+
     // TODO: test custom validators
 
     describe('mapJStoKO', () => {
         var data = {
-            thursday: "Before Friday",
+            thursday: 'Before Friday',
             object2: {
-                offer: "Greatly appreciated",
+                offer: 'Greatly appreciated',
                 other: 5
             },
             array2: [5, 4, 3, 2, 1],
-            more: "The other day",
+            more: 'The other day',
             number: 243
         };
 

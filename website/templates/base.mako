@@ -1,4 +1,3 @@
-<% import json %>
 <% from website import settings %>
 
 <!DOCTYPE html>
@@ -16,9 +15,8 @@
 
     % if sentry_dsn_js:
     <script src="/static/vendor/bower_components/raven-js/dist/raven.min.js"></script>
-    <script src="/static/vendor/bower_components/raven-js/plugins/jquery.js"></script>
     <script>
-        Raven.config('${ sentry_dsn_js }', {}).install();
+        Raven.config(${ sentry_dsn_js | sjson, n }, {}).install();
     </script>
     % else:
     <script>
@@ -37,7 +35,7 @@
     % endif
 
     <!-- Facebook display -->
-    <meta name="og:image" content="http://centerforopenscience.org/static/img/cos_center_logo_small.png"/>
+    <meta name="og:image" content="https://cos.io/static/img/cos_center_logo_small.png"/>
     <meta name="og:title" content="${self.title()}"/>
     <meta name="og:ttl" content="3"/>
     <meta name="og:description" content="${self.og_description()}"/>
@@ -48,34 +46,50 @@
     ${self.javascript()}
 
     <link href='//fonts.googleapis.com/css?family=Carrois+Gothic|Inika|Patua+One' rel='stylesheet' type='text/css'>
+    <link href='https://fonts.googleapis.com/css?family=Open+Sans:400,600,300' rel='stylesheet' type='text/css'>
 
 </head>
-<body data-spy="scroll" data-target=".nav-list-spy">
+<body data-spy="scroll" data-target=".scrollspy">
+
     % if dev_mode:
-    <style>
-        #devmode {
-            position:fixed;
-            bottom:0;
-            left:0;
-            border-top-right-radius:8px;
-            background-color:red;
-            color:white;
-            padding:.5em;
-        }
-    </style>
-    <div id='devmode'><strong>WARNING</strong>: This site is running in development mode.</div>
+        <div class="dev-mode-helper scripted" id="devModeControls">
+        <div id="metaInfo" data-bind="visible: showMetaInfo">
+            <h2>Current branch: <span data-bind="text: branch"></span></h2>
+            <table>
+                <thead>
+                <tr>
+                    <th>PR</th>
+                    <th>Title</th>
+                    <th>Date Merged</th>
+                </tr>
+                </thead>
+                <tbody data-bind="foreach: pullRequests">
+                    <tr>
+                        <td>#<a data-bind="attr: {href: url}, text: number"></a></td>
+                        <td data-bind="text: title"></td>
+                        <td data-bind="text: mergedAt"></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <style>
+            #devmode {
+                position:fixed;
+                bottom:0;
+                left:0;
+                border-top-right-radius:8px;
+                background-color:red;
+                color:white;
+                padding:.5em;
+            }
+        </style>
+        <div id='devmode' data-bind='click: showHideMetaInfo'><strong>WARNING</strong>: This site is running in development mode.</div>
+    </div>
     % endif
 
-    <%include file="nav.mako"/>
+    ${self.nav()}
      ## TODO: shouldn't always have the watermark class
-    <div class="watermarked">
-        <div class="container ${self.container_class()}">
-            % if status:
-                <%include file="alert.mako"/>
-            % endif
-            ${self.content()}
-        </div><!-- end container -->
-    </div><!-- end watermarked -->
+    ${self.content_wrap()}
 
 % if not user_id:
 <div id="footerSlideIn">
@@ -91,7 +105,7 @@
                 <div>
                     <a data-bind="click: trackClick.bind($data, 'Create Account')" class="btn btn-primary" href="${web_url_for('index')}#signUp">Create an Account</a>
 
-                    <a data-bind="click: trackClick.bind($data, 'Learn More')" class="btn btn-primary" href="/getting-started/">Learn More</a>
+                    <a data-bind="click: trackClick.bind($data, 'Learn More')" class="btn btn-primary" href="http://help.osf.io" target="_blank" rel="noreferrer">Learn More</a>
                     <a data-bind="click: dismiss">Hide this message</a>
                 </div>
             </div>
@@ -100,20 +114,23 @@
 </div>
 % endif
 
-    <%include file="footer.mako"/>
-        % if settings.PINGDOM_ID:
-            <script>
-            var _prum = [['id', '${settings.PINGDOM_ID}'],
-                            ['mark', 'firstbyte', (new Date()).getTime()]];
-            (function() {
-                var s = document.getElementsByTagName('script')[0]
-                    , p = document.createElement('script');
-                p.async = 'async';
-                p.src = '//rum-static.pingdom.net/prum.min.js';
-                s.parentNode.insertBefore(p, s);
-            })();
-            </script>
-        % endif
+
+    ${self.footer()}
+    <%include file="copyright.mako"/>
+        <%!
+            import hashlib
+
+            def user_hash(user_id):
+                token = hashlib.md5()
+                token.update(user_id)
+                return token.hexdigest()
+        %>
+
+        <%!
+            import datetime
+            def create_timestamp():
+                return str(datetime.datetime.utcnow())
+        %>
 
         % if settings.GOOGLE_ANALYTICS_ID:
             <script>
@@ -122,60 +139,58 @@
             m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
             })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
 
-            ga('create', '${settings.GOOGLE_ANALYTICS_ID}', 'auto', {'allowLinker': true});
+            ga('create', ${ settings.GOOGLE_ANALYTICS_ID | sjson, n }, 'auto', {'allowLinker': true});
             ga('require', 'linker');
-            ga('linker:autoLink', ['centerforopenscience.org'] );
+            ga('linker:autoLink', ['centerforopenscience.org', 'cos.io'] );
+            ga('set', 'dimension1', ${user_hash(user_id) | sjson, n});
+            ga('set', 'dimension2', ${create_timestamp() | sjson, n});
             ga('send', 'pageview');
             </script>
+
         % else:
             <script>
-                window.ga = function(source) {
-                        console.error('=== Mock ga event called: ===');
-                        console.log('event: ga(' +
-                                    arguments[0] + ', ' +
-                                    arguments[1] + ', ' +
-                                    arguments[2] + ', ' +
-                                    arguments[3] + ')'
-                        );
-                };
+                window.ga = function() {};
           </script>
-        % endif
-
-        % if piwik_host:
-            <script src="${ piwik_host }piwik.js" type="text/javascript"></script>
         % endif
 
         <script>
             // Mako variables accessible globally
             window.contextVars = $.extend(true, {}, window.contextVars, {
-                waterbutlerURL: '${waterbutler_url if waterbutler_url.endswith('/') else waterbutler_url + '/' | js_str}',
-            % if access_token:
-                accessToken: '${access_token | js_str}',
-            % endif
-                cookieName: '${cookie_name}'
+                waterbutlerURL: ${ waterbutler_url if waterbutler_url.endswith('/') else waterbutler_url + '/' | sjson, n },
+                // Whether or not this page is loaded under osf.io or another domain IE: institutions
+                isOnRootDomain: ${domain | sjson, n } === window.location.origin + '/',
+                cookieName: ${ cookie_name | sjson, n },
+                apiV2Prefix: ${ api_v2_base | sjson, n },
+                registerUrl: ${ api_url_for('register_user') | sjson, n },
+                currentUser: {
+                    id: ${ user_id | sjson, n },
+                    locale: ${ user_locale | sjson, n },
+                    timezone: ${ user_timezone | sjson, n },
+                    entryPoint: ${ user_entry_point | sjson, n },
+                    institutions: ${ user_institutions | sjson, n},
+                    emailsToAdd: ${ user_email_verifications | sjson, n },
+                    anon: ${ anon | sjson, n },
+                },
+                popular: ${ popular_links_node | sjson, n },
+                newAndNoteworthy: ${ noteworthy_links_node | sjson, n },
+                maintenance: ${ maintenance | sjson, n},
+                analyticsMeta: {},
             });
         </script>
 
-        % if piwik_host:
-            <% is_public = node.get('is_public', 'ERROR') if node else True %>
-            <script type="text/javascript">
-
-                $(function() {
-                    var cvars = [];
-                    % if user_id:
-                        cvars.push([1, "User ID", "${ user_id }", "visit"])
-                        cvars.push([2, "User Name", "${ user_full_name }", "visit"])
-                    % endif
-                    % if node:
-                        <% parent_project = parent_node.get('id') or node.get('id') %>
-                        cvars.push([2, "Project ID", "${ parent_project }", "page"]);
-                        cvars.push([3, "Node ID", "${ node.get('id') }", "page"]);
-                        cvars.push([4, "Tags", ${ json.dumps(','.join(node.get('tags', []))) }, "page"]);
-                    % endif
-                    // Note: Use cookies for global site ID; only one cookie
-                    // will be used, so this won't overflow uwsgi header
-                    // buffer.
-                    $.osf.trackPiwik("${ piwik_host }", ${ piwik_site_id }, cvars, true);
+        % if keen['public']['project_id']:
+            <script>
+                window.contextVars = $.extend(true, {}, window.contextVars, {
+                    keen: {
+                        public: {
+                            projectId: ${ keen['public']['project_id'] | sjson, n },
+                            writeKey: ${ keen['public']['write_key'] | sjson, n },
+                        },
+                        private: {
+                            projectId: ${ keen['private']['project_id'] | sjson, n },
+                            writeKey: ${ keen['private']['write_key'] | sjson, n },
+                        },
+                    },
                 });
             </script>
         % endif
@@ -187,6 +202,11 @@
 
 
 ###### Base template functions #####
+
+<%def name="nav()">
+    <%namespace name="nav_helper" file="nav.mako" />
+    ${nav_helper.nav(service_name='HOME', service_url='/', service_support_url='/support/')}
+</%def>
 
 <%def name="title()">
     ### The page title ###
@@ -220,6 +240,42 @@
     ### Javascript loaded at the bottom of the page ###
 </%def>
 
+<%def name="footer()">
+    <%include file="footer.mako"/>
+</%def>
+
+<%def name="alert()">
+    <%include file="alert.mako"/>
+</%def>
+
+<%def name="content_wrap()">
+    <div class="watermarked">
+        <div class="container ${self.container_class()}">
+            ## Maintenance alert
+            % if maintenance:
+                <div id="maintenance" class="scripted alert alert-dismissible" role="alert">
+                <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                    <span aria-hidden="true">&times;</span></button>
+                <strong>Notice:</strong>
+                % if maintenance['message']:
+                    ${maintenance['message']}
+                % else:
+                    The site will undergo maintenance between <span id="maintenanceTime"></span>.
+                    Thank you for your patience.
+                % endif
+            </div>
+            % endif
+            ## End Maintenance alert
+
+            % if status:
+                ${self.alert()}
+            % endif
+
+            ${self.content()}
+        </div><!-- end container -->
+    </div><!-- end watermarked -->
+</%def>
+
 
 <%def name="includes_top()">
 
@@ -232,24 +288,23 @@
       <script src="//cdnjs.cloudflare.com/ajax/libs/es5-shim/4.0.3/es5-sham.min.js"></script>
     <![endif]-->
 
-    <!-- Le styles -->
-    ## TODO: Get fontawesome and select2 to play nicely with webpack
+    ## TODO: Install bootstrap with npm and build it into vendor.js when
+    ## https://github.com/webpack/webpack/issues/2023 is resolved
     <link rel="stylesheet" href="/static/vendor/bower_components/bootstrap/dist/css/bootstrap.min.css">
-    <link rel="stylesheet" href="/static/vendor/bower_components/select2/select2.css">
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/es6-shim/0.35.0/es6-shim.min.js"></script>
 
     % if settings.USE_CDN_FOR_CLIENT_LIBS:
-        <script src="//code.jquery.com/jquery-1.11.2.min.js"></script>
+        <script src="//ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
         <script>window.jQuery || document.write('<script src="/static/vendor/bower_components/jquery/dist/jquery.min.js">\x3C/script>')</script>
-        <script src="//code.jquery.com/ui/1.10.3/jquery-ui.min.js"></script>
-        <script>window.jQuery.ui || document.write('<script src="/static/vendor/bower_components/jquery-ui/ui/minified/jquery-ui.min.js">\x3C/script>')</script>
+        <script src="//ajax.googleapis.com/ajax/libs/jqueryui/1.12.1/jquery-ui.min.js"></script>
+        <script>window.jQuery.ui || document.write('<script src="/static/vendor/bower_components/jquery-ui/jquery-ui.min.js">\x3C/script>')</script>
     % else:
         <script src="/static/vendor/bower_components/jquery/dist/jquery.min.js"></script>
-        <script src="/static/vendor/bower_components/jquery-ui/ui/minified/jquery-ui.min.js"></script>
+        <script src="/static/vendor/bower_components/jquery-ui/jquery-ui.min.js"></script>
     % endif
-
     ## NOTE: We load vendor bundle  at the top of the page because contains
     ## the webpack runtime and a number of necessary stylesheets which should be loaded before the user sees
     ## content.
-    <script src="${"/static/public/js/vendor.js" | webpack_asset}"></script>
-
+    <script src="${'/static/public/js/vendor.js' | webpack_asset}"></script>
 </%def>

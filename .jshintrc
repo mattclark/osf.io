@@ -1,7 +1,6 @@
 {
     "indent": 4,
     "boss": true,
-    "curly": true,
     "eqeqeq": true,
     "eqnull": true,
     "expr": true,
@@ -15,7 +14,8 @@
     "node": true,
     "evil": true,
     "esnext": true,
-    "predef": ["window", "document"],
+    "predef": ["window", "document", "__ENABLE_DEV_MODE_CONTROLS"],
     "browser": true,
-    "validthis": true
+    "validthis": true,
+    "loopfunc": true
 }

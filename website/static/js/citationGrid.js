@@ -117,7 +117,7 @@ var makeButtons = function(item, col, buttons) {
                         class: button.css,
                         'data-toggle': 'tooltip',
                         'data-placement': 'bottom',
-                        'data-clipboard-text': button.clipboard,
+                        'data-clipboard-target': item.data.csl ? item.data.csl.id : button.clipboard,
                         config: mergeConfigs(button.config, tooltipConfig),
                         onclick: button.onclick ?
                             function(event) {
@@ -141,7 +141,7 @@ var buildExternalUrl = function(csl) {
     if (csl.URL) {
         return csl.URL;
     } else if (csl.DOI) {
-        return 'http://dx.doi.org/' + csl.DOI;
+        return 'https://doi.org/' + csl.DOI;
     } else if (csl.PMID) {
         return 'http://www.ncbi.nlm.nih.gov/pubmed/' + csl.PMID;
     }
@@ -219,10 +219,16 @@ var renderActions = function(item, col) {
             css: 'btn btn-default btn-xs',
             tooltip: 'Download citations',
             config: function(elm, isInit, ctx) {
-                var text = self.getCitations(item).join('\n');
+                // In JS, double-backlashes escape in-string backslashes,
+                // Quick overview of RTF file formatting (see https://msdn.microsoft.com/en-us/library/aa140284%28v=office.10%29.aspx for more):
+                // "{\rtf1\ansi             <- RTF headers indicating RTF version and char encoding, other headers possible but unecessary
+                //  [content line 1]\       <- Trailing backlash indicating newline in displayed file, \n otherwise ignored for display
+                //  [content line 2]        <- Trailing backslash not strictly necessary for final line, but doesn't hurt
+                //  }"                      <- Closing brace indicates EOF for display purposes
+                var text = '{\\rtf1\\ansi\n' + self.getCitations(item, 'rtf').join('\\\n') + '\n}';
                 $(elm).parent('a')
-                    .attr('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text))
-                    .attr('download', item.data.name + '-' + self.styleName + '.txt');
+                    .attr('href', 'data:text/enriched;charset=utf-8,' + encodeURIComponent(text))
+                    .attr('download', item.data.name + '-' + self.styleName + '.rtf');
             }
         });
     }
@@ -291,7 +297,7 @@ CitationGrid.prototype.initTreebeard = function() {
         // TODO remove special case for Zotero
         if (self.provider === 'Zotero') {
             if (data.length >= 200) {
-        data.push({
+                data.push({
                     name: 'Only 200 citations may be displayed',
                     kind: 'message'
                 });
@@ -309,7 +315,7 @@ CitationGrid.prototype.initStyleSelect = function() {
         allowClear: false,
         formatResult: formatResult,
         formatSelection: formatSelection,
-        placeholder: 'Citation Style (e.g. "APA")',
+        placeholder: 'Enter citation style (e.g. "APA")',
         minimumInputLength: 1,
         ajax: {
             url: '/api/v1/citations/styles/',
@@ -332,9 +338,11 @@ CitationGrid.prototype.initStyleSelect = function() {
             self.updateStyle(event.val, xml);
         }).fail(function(jqxhr, status, error) {
             Raven.captureMessage('Error while selecting citation style: ' + event.val, {
-                url: styleUrl,
-                status: status,
-                error: error
+                extra: {
+                    url: styleUrl,
+                    status: status,
+                    error: error
+                }
             });
         });
     });
@@ -344,10 +352,10 @@ CitationGrid.prototype.updateStyle = function(name, xml) {
     this.styleName = name;
     this.styleXml = xml;
     this.bibliographies = {};
-    this.treebeard.tbController.redraw();
+    this.treebeard.redraw();
 };
 
-CitationGrid.prototype.makeBibliography = function(folder) {
+CitationGrid.prototype.makeBibliography = function(folder, format) {
     var data = objectify(
         folder.children.filter(function(child) {
             return child.kind === 'file';
@@ -355,7 +363,8 @@ CitationGrid.prototype.makeBibliography = function(folder) {
             return child.data.csl;
         })
     );
-    var citeproc = citations.makeCiteproc(this.styleXml, data, 'text');
+    format = format || 'html';
+    var citeproc = citations.makeCiteproc(this.styleXml, data, format);
     var bibliography = citeproc.makeBibliography();
     if (bibliography[0].entry_ids) {
         return utils.reduce(
@@ -368,22 +377,25 @@ CitationGrid.prototype.makeBibliography = function(folder) {
     return {};
 };
 
-CitationGrid.prototype.getBibliography = function(folder) {
+CitationGrid.prototype.getBibliography = function(folder, format) {
+    if (format) {
+        return this.makeBibliography(folder, format);
+    }
     this.bibliographies[folder.id] = this.bibliographies[folder.id] || this.makeBibliography(folder);
     return this.bibliographies[folder.id];
 };
 
-CitationGrid.prototype.getCitation = function(item) {
-    var bibliography = this.getBibliography(item.parent());
+CitationGrid.prototype.getCitation = function(item, format) {
+    var bibliography = this.getBibliography(item.parent(), format);
     return bibliography[item.data.csl.id];
 };
 
-CitationGrid.prototype.getCitations = function(folder) {
+CitationGrid.prototype.getCitations = function(folder, format) {
     var self = this;
     return folder.children.filter(function(child) {
         return child.kind === 'file';
     }).map(function(child) {
-        return self.getCitation(child);
+        return self.getCitation(child, format);
     });
 };
 
@@ -400,7 +412,13 @@ CitationGrid.prototype.resolveRowAux = function(item) {
                 return item.data.name;
             }
             else {
-                return self.getCitation(item);
+                var citationContent;
+                try {
+                    citationContent = self.getCitation(item);
+                } catch(err) {
+                    citationContent = '<em>Could not render entry. Please check the contents of your citations for correctness.</em>';
+                }
+                return m('span', {id: item.data.csl.id}, [m.trust(citationContent)]);
             }
         }
     }, {

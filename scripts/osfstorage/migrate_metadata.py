@@ -7,7 +7,7 @@ from modularodm import Q
 import logging
 import sys
 
-from website.addons.osfstorage.model import OsfStorageFileVersion
+from addons.osfstorage.model import OsfStorageFileVersion
 from website.app import init_app
 
 from scripts import utils as scripts_utils
@@ -23,6 +23,7 @@ def main():
         logger.info('Updating metadata for OsfStorageFileVersion {}'.format(each._id))
         if 'dry' not in sys.argv:
             each.update_metadata(each.metadata)
+            each.save()
 
 if __name__ == '__main__':
     # Set up storage backends

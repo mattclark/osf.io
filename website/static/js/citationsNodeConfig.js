@@ -5,16 +5,15 @@
 'use strict';
 
 var ko = require('knockout');
-require('knockout.punches');
 var $ = require('jquery');
 var Raven = require('raven-js');
 var bootbox = require('bootbox');
+require('js/osfToggleHeight');
 
 var $osf = require('js/osfHelpers');
 var oop = require('js/oop');
 var FolderPickerViewModel = require('js/folderPickerNodeConfig');
 
-ko.punches.enableAll();
 
 /**
  * View model to support instances of CitationsNodeConfig (folder picker widget)
@@ -39,7 +38,7 @@ var CitationsFolderPickerViewModel = oop.extend(FolderPickerViewModel, {
         });
 
         self.treebeardOptions = $.extend(
-            {}, 
+            {},
             FolderPickerViewModel.prototype.treebeardOptions,
             {
                 /** Callback for chooseFolder action.
@@ -52,9 +51,9 @@ var CitationsFolderPickerViewModel = oop.extend(FolderPickerViewModel, {
                         name: item.data.name,
                         id: item.data.id
                     });
-                    return false; // Prevent event propagation     
+                    return false; // Prevent event propagation
                 }.bind(this),
-                lazyLoadPreprocess: function(data) {    
+                lazyLoadPreprocess: function(data) {
                     return data.contents.filter(function(item) {
                     return item.kind === 'folder';
                     });
@@ -70,13 +69,16 @@ var CitationsFolderPickerViewModel = oop.extend(FolderPickerViewModel, {
         var request = $.get(self.urls().accounts);
         request.then(function(data) {
             ret.resolve(data.accounts);
+            $('.addon-auth-table').osfToggleHeight({height: 140});
         });
         request.fail(function(xhr, textStatus, error) {
-            self.changeMessage(self.messages.updateAccountsError(), 'text-warning');
+            self.changeMessage(self.messages.updateAccountsError(), 'text-danger');
             Raven.captureMessage('Could not GET ' + self.addonName + ' accounts for user', {
-                url: self.url,
-                textStatus: textStatus,
-                error: error
+                extra: {
+                    url: self.url,
+                    textStatus: textStatus,
+                    error: error
+                }
             });
             ret.reject(xhr, textStatus, error);
         });
@@ -105,6 +107,7 @@ var CitationsFolderPickerViewModel = oop.extend(FolderPickerViewModel, {
         window.oauthComplete = function(res) {
             // Update view model based on response
             self.changeMessage(self.messages.connectAccountSuccess(), 'text-success', 3000);
+            self.userHasAuth(true);
             self.importAuth.call(self);
         };
         window.open(self.urls().auth);
@@ -119,7 +122,9 @@ var CitationsFolderPickerViewModel = oop.extend(FolderPickerViewModel, {
         ).then(self.onImportSuccess.bind(self), self.onImportError.bind(self));
     },
     _updateCustomFields: function(settings){
-        this.userAccountId(settings.userAccountId);
+        var self = this;
+        self.userAccountId(settings.userAccountId);
+        self.validCredentials(settings.validCredentials);
     },
     _serializeSettings: function(){
         return {
@@ -134,32 +139,59 @@ var CitationsFolderPickerViewModel = oop.extend(FolderPickerViewModel, {
             .then(function(){
                 if (self.accounts().length > 1) {
                     bootbox.prompt({
-                        title: 'Choose ' + self.addonName + ' Access Token to Import',
+                        title: 'Choose ' + $osf.htmlEscape(self.addonName) + ' Access Token to Import',
                         inputType: 'select',
                         inputOptions: ko.utils.arrayMap(
                             self.accounts(),
                             function(item) {
                                 return {
-                                    text: item.name,
+                                    text: $osf.htmlEscape(item.name),
                                     value: item.id
                                 };
                             }
                         ),
                         value: self.accounts()[0].id,
-                        callback: (self.connectExistingAccount.bind(self))
+                        callback: function(accountId) {
+                            if (accountId) {
+                                self.connectExistingAccount.call(self, (accountId));
+                            }
+                        },
+                        buttons:{
+                            confirm:{
+                                label: 'Import'
+                            }
+                        }
                     });
                 } else {
                     bootbox.confirm({
-                        title: 'Import ' + self.addonName + ' Access Token?',
+                        title: 'Import ' + $osf.htmlEscape(self.addonName) + ' access token',
                         message: self.messages.confirmAuth(),
                         callback: function(confirmed) {
                             if (confirmed) {
                                 self.connectExistingAccount.call(self, (self.accounts()[0].id));
                             }
+                        },
+                        buttons:{
+                            confirm:{
+                                label:'Import'
+                            }
                         }
                     });
                 }
             });
+    },
+    afterUpdate: function() {
+        var self = this;
+        if (self.nodeHasAuth() && !self.validCredentials()) {
+            var message;
+            if (self.userIsOwner()) {
+                message = self.messages.invalidCredOwner();
+            }
+            else {
+                message = self.messages.invalidCredNotOwner();
+            }
+            self.changeMessage(message, 'text-danger');
+        }
     }
 });
 // Public API

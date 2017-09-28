@@ -18,7 +18,7 @@ from website.app import init_app
 from scripts import utils as script_utils
 from framework.transactions.context import TokuTransaction
 
-from website.addons.dataverse.model import AddonDataverseNodeSettings
+from addons.dataverse.model import AddonDataverseNodeSettings
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ def get_targets():
 
 
 def main(dry=True):
-    init_app(set_backends=True, routes=False, mfr=False)  # Sets the storage backends on all models
+    init_app(set_backends=True, routes=False)  # Sets the storage backends on all models
     do_migration(get_targets(), dry=dry)
 
 
