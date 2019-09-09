@@ -53,21 +53,24 @@
 
             % if not summary['archiving']:
             <div class="pull-right">
-                % if not summary['primary'] and 'write' in user['permissions'] and not node['is_registration']:
+                % if not summary['primary'] and permissions.WRITE in user['permissions'] and not node['is_registration']:
                     <i class="fa fa-times remove-pointer" data-id="${summary['id']}" data-toggle="tooltip" title="Remove link"></i>
                     <i class="fa fa-code-fork" onclick="NodeActions.forkPointer('${summary['id']}', '${summary['primary_id']}');" data-toggle="tooltip" title="Create a fork of ${summary['title']}"></i>
                 % endif
-                % if summary['primary'] and summary['logged_in'] and summary['is_contributor'] and not summary['is_registration']:
-                    <div class="dropdown pull-right" id="componentQuickActions">
-                        <button class="btn btn-default dropdown-toggle" type="button" data-toggle="dropdown">
-                            <span class="glyphicon glyphicon-option-horizontal"></span>
+                % if summary['primary'] and summary['logged_in'] and summary['is_contributor_or_group_member'] and not summary['is_registration']:
+                    <div class="generic-dropdown dropdown pull-right">
+                        <button class="btn btn-default dropdown-toggle dropdown-toggle-sm" type="button" data-toggle="dropdown">
+                            <span class="fa fa-ellipsis-h"></span>
                         </button>
                         <ul class="dropdown-menu dropdown-menu-right">
                             <li><a tabindex="-1" href="${domain}${summary['id']}/contributors/">Manage Contributors</a></li>
                             <li><a tabindex="-1" href="${domain}${summary['id']}/settings/">Settings</a></li>
                             % if summary['is_admin']:
                             <li>
-                                <a tabindex="-1" onclick="ComponentActions.deleteNode(${summary['childExists'] | sjson, n}, '${summary['node_type']}', ${summary['isPreprint'] | sjson, n},'${summary['api_url']}')" type="button">
+                                <a tabindex="-1"
+                                    data-toggle="modal" data-target="#nodesDelete"
+                                    data-bind="click: $root.delete.bind($root, ${summary['childExists'] | sjson, n}, '${summary['node_type']}', ${summary['is_supplemental_project'] | sjson, n},  '${summary['api_url']}')"
+                                    type="button">
                                     Delete
                                 </a>
                             </li>
@@ -97,15 +100,16 @@
         <div class="project-authors">
             ${contributor_list.render_contributors(contributors=summary['contributors'], others_count=summary['others_count'], node_url=summary['url'])}
         </div>
+        % if summary['groups']:
+            <div class="project-authors">
+                ${summary['groups']}
+            </div>
+        % endif
         % else:
             <div>Anonymous Contributors</div>
         % endif
-        % if not summary['anonymous']:
-            % if summary['nlogs'] > 1:
-                <span class="text-muted">${summary['nlogs']} contributions</span>
-            % else:
-                <span class="text-muted">${summary['nlogs']} contribution</span>
-            % endif
+        % if summary['description']:
+            <span class="text-muted">${summary['description']}</span>
         % endif
         % if not summary['archiving']:
             <div class="body hide" id="body-${summary['id']}" style="overflow:hidden;">
@@ -117,7 +121,9 @@
                 Recent Activity
                 <div id="logFeed-${summary['primary_id'] if not summary['primary'] else summary['id']}">
                     <div class="spinner-loading-wrapper">
-                        <div class="logo-spin logo-lg"></div>
+                        <div class="ball-scale ball-scale-blue">
+                            <div></div>
+                        </div>
                          <p class="m-t-sm fg-load-message"> Loading logs...  </p>
                     </div>
                 </div>
@@ -140,7 +146,7 @@
             %else:
                 Private Component
             %endif
-            % if not summary['primary'] and 'write' in user['permissions'] and not node['is_registration']:
+            % if not summary['primary'] and permissions.WRITE in user['permissions'] and not node['is_registration']:
                 ## Allow deletion of pointers, even if user doesn't know what they are deleting
                 <span class="pull-right">
                     <i class="fa fa-times remove-pointer pointer" data-id="${summary['id']}"

@@ -1,21 +1,24 @@
 # -*- coding: utf-8 -*-
 import urllib
-import urlparse
-
 import furl
+import urlparse
+from distutils.version import StrictVersion
+from hashids import Hashids
+
+from django.utils.http import urlquote
 from django.core.exceptions import ObjectDoesNotExist
-from django.db.models import Q
+from django.db.models import QuerySet, F
 from rest_framework.exceptions import NotFound
 from rest_framework.reverse import reverse
 
 from api.base.authentication.drf import get_session_from_cookie
 from api.base.exceptions import Gone, UserGone
+from api.base.settings import HASHIDS_SALT
 from framework.auth import Auth
 from framework.auth.cas import CasResponse
 from framework.auth.oauth_scopes import ComposedScopes, normalize_scopes
 from osf.models import OSFUser, Node, Registration
 from osf.models.base import GuidMixin
-from osf.modm_compat import to_django_query
 from osf.utils.requests import check_select_for_update
 from website import settings as website_settings
 from website import util as website_util  # noqa
@@ -28,12 +31,14 @@ FALSY = set(('f', 'F', 'false', 'False', 'FALSE', '0', 0, 0.0, False, 'off', 'OF
 
 UPDATE_METHODS = ['PUT', 'PATCH']
 
+hashids = Hashids(alphabet='abcdefghijklmnopqrstuvwxyz', salt=HASHIDS_SALT)
+
 def decompose_field(field):
     from api.base.serializers import (
         HideIfWithdrawal, HideIfRegistration,
-        HideIfDisabled, AllowMissing
+        HideIfDisabled, AllowMissing, NoneIfWithdrawal,
     )
-    WRAPPER_FIELDS = (HideIfWithdrawal, HideIfRegistration, HideIfDisabled, AllowMissing)
+    WRAPPER_FIELDS = (HideIfWithdrawal, HideIfRegistration, HideIfDisabled, AllowMissing, NoneIfWithdrawal)
 
     while isinstance(field, WRAPPER_FIELDS):
         try:
@@ -76,10 +81,24 @@ def absolute_reverse(view_name, query_kwargs=None, args=None, kwargs=None):
     return url
 
 
-def get_object_or_error(model_cls, query_or_pk, request, display_name=None):
+def get_object_or_error(model_or_qs, query_or_pk=None, request=None, display_name=None):
+    if not request:
+        # for backwards compat with existing get_object_or_error usages
+        raise TypeError('request is a required argument')
+
     obj = query = None
+    model_cls = model_or_qs
     select_for_update = check_select_for_update(request)
-    if isinstance(query_or_pk, basestring):
+
+    if isinstance(model_or_qs, QuerySet):
+        # they passed a queryset
+        model_cls = model_or_qs.model
+        try:
+            obj = model_or_qs.select_for_update().get() if select_for_update else model_or_qs.get()
+        except model_cls.DoesNotExist:
+            raise NotFound
+
+    elif isinstance(query_or_pk, basestring):
         # they passed a 5-char guid as a string
         if issubclass(model_cls, GuidMixin):
             # if it's a subclass of GuidMixin we know it's primary_identifier_name
@@ -93,11 +112,10 @@ def get_object_or_error(model_cls, query_or_pk, request, display_name=None):
                 obj = model_cls.load(query_or_pk, select_for_update=select_for_update)
     else:
         # they passed a query
-        if hasattr(model_cls, 'primary_identifier_name'):
-            query = to_django_query(query_or_pk, model_cls=model_cls)
-        else:
-            # fall back to modmcompatibility's find_one
-            obj = model_cls.find_one(query_or_pk, select_for_update=select_for_update)
+        try:
+            obj = model_cls.objects.filter(query_or_pk).select_for_update().get() if select_for_update else model_cls.objects.get(query_or_pk)
+        except model_cls.DoesNotExist:
+            raise NotFound
 
     if not obj:
         if not query:
@@ -118,56 +136,31 @@ def get_object_or_error(model_cls, query_or_pk, request, display_name=None):
     # disabled.
     if model_cls is OSFUser and obj.is_disabled:
         raise UserGone(user=obj)
-    elif model_cls is not OSFUser and not getattr(obj, 'is_active', True) or getattr(obj, 'is_deleted', False):
+    elif model_cls is not OSFUser and not getattr(obj, 'is_active', True) or getattr(obj, 'is_deleted', False) or getattr(obj, 'deleted', False):
         if display_name is None:
             raise Gone
         else:
             raise Gone(detail='The requested {name} is no longer available.'.format(name=display_name))
     return obj
 
+def default_node_list_queryset(model_cls):
+    assert model_cls in {Node, Registration}
+    return model_cls.objects.filter(is_deleted=False).annotate(region=F('addons_osfstorage_node_settings__region___id'))
 
-def waterbutler_url_for(request_type, provider, path, node_id, token, obj_args=None, **query):
-    """Reverse URL lookup for WaterButler routes
-    :param str request_type: data or metadata
-    :param str provider: The name of the requested provider
-    :param str path: The path of the requested file or folder
-    :param str node_id: The id of the node being accessed
-    :param str token: The cookie to be used or None
-    :param dict **query: Addition query parameters to be appended
+def default_node_permission_queryset(user, model_cls):
     """
-    url = furl.furl(website_settings.WATERBUTLER_URL)
-    url.path.segments.append(request_type)
+    Return nodes that are either public or you have perms because you're a contributor.
+    Implicit admin permissions not included here (NodeList, UserNodes, for example, don't factor this in.)
+    """
+    assert model_cls in {Node, Registration}
+    return model_cls.objects.get_nodes_for_user(user, include_public=True)
 
-    url.args.update({
-        'path': path,
-        'nid': node_id,
-        'provider': provider,
-    })
-
-    if token is not None:
-        url.args['cookie'] = token
-
-    if 'view_only' in obj_args:
-        url.args['view_only'] = obj_args['view_only']
-
-    url.args.update(query)
-    return url.url
-
-def default_node_list_queryset():
-    return Node.objects.filter(is_deleted=False)
-
-def default_node_permission_queryset(user):
-    if user.is_anonymous:
-        return Node.objects.filter(is_public=True)
-    return Node.objects.filter(Q(is_public=True) | Q(contributor__user_id=user.pk))
-
-def default_registration_list_queryset():
-    return Registration.objects.filter(is_deleted=False)
-
-def default_registration_permission_queryset(user):
-    if user.is_anonymous:
-        return Registration.objects.filter(is_public=True)
-    return Registration.objects.filter(Q(is_public=True) | Q(contributor__user_id=user.pk))
+def default_node_list_permission_queryset(user, model_cls):
+    # **DO NOT** change the order of the querysets below.
+    # If get_roots() is called on default_node_list_qs & default_node_permission_qs,
+    # Django's alaising will break and the resulting QS will be empty and you will be sad.
+    qs = default_node_permission_queryset(user, model_cls) & default_node_list_queryset(model_cls)
+    return qs.annotate(region=F('addons_osfstorage_node_settings__region___id'))
 
 def extend_querystring_params(url, params):
     scheme, netloc, path, query, _ = urlparse.urlsplit(url)
@@ -198,8 +191,37 @@ def has_admin_scope(request):
 
     return set(ComposedScopes.ADMIN_LEVEL).issubset(normalize_scopes(token.attributes['accessTokenScope']))
 
-
-def is_deprecated(request_version, min_version, max_version):
-    if request_version < min_version or request_version > max_version:
+def is_deprecated(request_version, min_version=None, max_version=None):
+    if not min_version and not max_version:
+        raise NotImplementedError('Must specify min or max version.')
+    min_version_deprecated = min_version and StrictVersion(request_version) < StrictVersion(str(min_version))
+    max_version_deprecated = max_version and StrictVersion(request_version) > StrictVersion(str(max_version))
+    if min_version_deprecated or max_version_deprecated:
         return True
     return False
+
+
+def waterbutler_api_url_for(node_id, provider, path='/', _internal=False, base_url=None, **kwargs):
+    assert path.startswith('/'), 'Path must always start with /'
+    if provider != 'osfstorage':
+        base_url = None
+    url = furl.furl(website_settings.WATERBUTLER_INTERNAL_URL if _internal else (base_url or website_settings.WATERBUTLER_URL))
+    segments = ['v1', 'resources', node_id, 'providers', provider] + path.split('/')[1:]
+    url.path.segments.extend([urlquote(x) for x in segments])
+    url.args.update(kwargs)
+    return url.url
+
+def assert_resource_type(obj, resource_tuple):
+    assert type(resource_tuple) is tuple, 'resources must be passed in as a tuple.'
+    if len(resource_tuple) == 1:
+        error_message = resource_tuple[0].__name__
+    elif len(resource_tuple) == 2:
+        error_message = resource_tuple[0].__name__ + ' or ' + resource_tuple[1].__name__
+    else:
+        error_message = ''
+        for resource in resource_tuple[:-1]:
+            error_message += resource.__name__ + ', '
+        error_message += 'or ' + resource_tuple[-1].__name__
+
+    a_or_an = 'an' if error_message[0].lower() in 'aeiou' else 'a'
+    assert isinstance(obj, resource_tuple), 'obj must be {} {}; got {}'.format(a_or_an, error_message, obj)

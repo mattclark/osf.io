@@ -84,10 +84,14 @@ INSTALLED_APPS = (
     'django.contrib.staticfiles',
 
     # 3rd party
+    'django_celery_results',
     'raven.contrib.django.raven_compat',
     'webpack_loader',
     'django_nose',
     'password_reset',
+    'guardian',
+    'waffle',
+    'elasticsearch_metrics',
 
     # OSF
     'osf',
@@ -114,6 +118,7 @@ INSTALLED_APPS = (
 
 MIGRATION_MODULES = {
     'osf': None,
+    'reviews': None,
     'addons_osfstorage': None,
     'addons_wiki': None,
     'addons_twofactor': None,
@@ -144,13 +149,14 @@ CORS_ORIGIN_WHITELIST = (urlparse(osf_settings.DOMAIN).netloc,
                          )
 CORS_ALLOW_CREDENTIALS = True
 
-MIDDLEWARE_CLASSES = (
+MIDDLEWARE = (
     # TokuMX transaction support
     # Needs to go before CommonMiddleware, so that transactions are always started,
     # even in the event of a redirect. CommonMiddleware may cause other middlewares'
     # process_request to be skipped, e.g. when a trailing slash is omitted
     'api.base.middleware.DjangoGlobalMiddleware',
     'api.base.middleware.CeleryTaskMiddleware',
+    'api.base.middleware.PostcommitTaskMiddleware',
 
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -160,6 +166,7 @@ MIDDLEWARE_CLASSES = (
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'waffle.middleware.WaffleMiddleware',
 )
 
 MESSAGE_TAGS = {
@@ -235,9 +242,19 @@ DESK_KEY_SECRET = ''
 
 TINYMCE_APIKEY = ''
 
+SHARE_URL = osf_settings.SHARE_URL
+API_DOMAIN = osf_settings.API_DOMAIN
+
 if DEBUG:
-    INSTALLED_APPS += ('debug_toolbar', )
-    MIDDLEWARE_CLASSES += ('debug_toolbar.middleware.DebugToolbarMiddleware', )
+    INSTALLED_APPS += ('debug_toolbar', 'nplusone.ext.django',)
+    MIDDLEWARE += ('debug_toolbar.middleware.DebugToolbarMiddleware', 'nplusone.ext.django.NPlusOneMiddleware',)
     DEBUG_TOOLBAR_CONFIG = {
-        'SHOW_TOOLBAR_CALLBACK': lambda(_): True
+        'SHOW_TOOLBAR_CALLBACK': lambda(_): True,
+        'DISABLE_PANELS': {
+            'debug_toolbar.panels.templates.TemplatesPanel',
+            'debug_toolbar.panels.redirects.RedirectsPanel'
+        }
     }
+
+# If set to True, automated tests with extra queries will fail.
+NPLUSONE_RAISE = False

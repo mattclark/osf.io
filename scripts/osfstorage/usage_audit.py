@@ -13,11 +13,13 @@ import logging
 import functools
 
 from collections import defaultdict
+from django.contrib.contenttypes.models import ContentType
 
-import progressbar
+from tqdm import tqdm
+
 
 from framework.celery_tasks import app as celery_app
-from osf.models import TrashedFile
+from osf.models import TrashedFile, Node
 
 from website import mails
 from website.app import init_app
@@ -58,19 +60,21 @@ def add_to_white_list(gtg):
 
 
 def get_usage(node):
-    vids = [each for each in BaseFileNode.active.filter(provider='osfstorage', node=node).values_list('versions', flat=True) if each]
+    node_content_type = ContentType.objects.get_for_model(Node)
 
-    t_vids = [each for eac in TrashedFile.objects.filter(provider='osfstorage', node=node).values_list('versions', flat=True) if each]
+    vids = [each for each in BaseFileNode.active.filter(provider='osfstorage', target_object_id=node.id, target_content_type=node_content_type).values_list('versions', flat=True) if each]
+    t_vids = [each for eac in TrashedFile.objects.filter(provider='osfstorage', target_object_id=node.id, target_content_type=node_content_type).values_list('versions', flat=True) if each]
 
     usage = sum([v.size or 0 for v in FileVersion.objects.filter(id__in=vids)])
     trashed_usage = sum([v.size or 0 for v in FileVersion.objects.filter(id__in=t_vids)])
 
-    return map(sum, zip(*([(usage, trashed_usage)] + [get_usage(child) for child in node.nodes_primary])))  # Adds tuples together, map(sum, zip((a, b), (c, d))) -> (a+c, b+d)
+    return list(map(sum, zip(*([(usage, trashed_usage)] + [get_usage(child) for child in node.nodes_primary]))))  # Adds tuples together, map(sum, zip((a, b), (c, d))) -> (a+c, b+d)
 
 
 def limit_filter(limit, (item, usage)):
     """Note: usage is a tuple(current_usage, deleted_usage)"""
     return item not in WHITE_LIST and sum(usage) >= limit
+
 
 def main(send_email=False):
     logger.info('Starting Project storage audit')
@@ -80,7 +84,7 @@ def main(send_email=False):
     users = defaultdict(lambda: (0, 0))
 
     top_level_nodes = AbstractNode.objects.get_roots()
-    progress_bar = progressbar.ProgressBar(maxval=top_level_nodes.count()).start()
+    progress_bar = tqdm(total=top_level_nodes.count())
     top_level_nodes = top_level_nodes.iterator()
 
     for i, node in enumerate(top_level_nodes):
@@ -94,7 +98,7 @@ def main(send_email=False):
 
         if i % 25 == 0:
             gc.collect()
-    progress_bar.finish()
+    progress_bar.close()
 
     for model, collection, limit in ((OSFUser, users, USER_LIMIT), (AbstractNode, projects, PROJECT_LIMIT)):
         for item, (used, deleted) in filter(functools.partial(limit_filter, limit), collection.items()):
@@ -105,7 +109,7 @@ def main(send_email=False):
     if lines:
         if send_email:
             logger.info('Sending email...')
-            mails.send_mail('support+scripts@osf.io', mails.EMPTY, body='\n'.join(lines), subject='Script: OsfStorage usage audit')
+            mails.send_mail('support+scripts@osf.io', mails.EMPTY, body='\n'.join(lines), subject='Script: OsfStorage usage audit', can_change_preferences=False,)
         else:
             logger.info('send_email is False, not sending email'.format(len(lines)))
         logger.info('{} offending project(s) and user(s) found'.format(len(lines)))

@@ -4,12 +4,12 @@ import re
 from django.core.validators import URLValidator, validate_email as django_validate_email
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.deconstruct import deconstructible
+from django.utils.six import string_types
 
 from website.notifications.constants import NOTIFICATION_TYPES
-from website.util.sanitize import strip_html
-from website import settings
 
-from osf.exceptions import ValidationError, ValidationValueError, reraise_django_validation_errors
+from osf.utils.sanitize import strip_html
+from osf.exceptions import ValidationError, ValidationValueError, reraise_django_validation_errors, BlacklistedEmailError
 
 
 def validate_history_item(items):
@@ -38,7 +38,7 @@ def validate_year(item):
         except ValueError:
             raise ValidationValueError('Please enter a valid year.')
         else:
-            if len(item) != 4:
+            if isinstance(item, string_types) and len(item) != 4:
                 raise ValidationValueError('Please enter a valid year.')
 
 
@@ -55,7 +55,7 @@ def validate_subscription_type(value):
 
 def validate_title(value):
     """Validator for Node#title. Makes sure that the value exists and is not
-    above 200 characters.
+    above 512 characters.
     """
     if value is None or not value.strip():
         raise ValidationValueError('Title cannot be blank.')
@@ -65,8 +65,8 @@ def validate_title(value):
     if value is None or not value.strip():
         raise ValidationValueError('Invalid title.')
 
-    if len(value) > 200:
-        raise ValidationValueError('Title cannot exceed 200 characters.')
+    if len(value) > 512:
+        raise ValidationValueError('Title cannot exceed 512 characters.')
 
     return True
 
@@ -89,10 +89,13 @@ def validate_social(value):
             raise ValidationError('{} is not a valid key for social.'.format(soc_key))
 
 def validate_email(value):
+    from osf.models import BlacklistedEmailDomain
     with reraise_django_validation_errors():
         django_validate_email(value)
-    if value.split('@')[1].lower() in settings.BLACKLISTED_DOMAINS:
-        raise ValidationError('Invalid Email')
+    domain = value.split('@')[1].lower()
+    if BlacklistedEmailDomain.objects.filter(domain=domain).exists():
+        raise BlacklistedEmailError('Invalid Email')
+
 
 def validate_subject_highlighted_count(provider, is_highlighted_addition):
     if is_highlighted_addition and provider.subjects.filter(highlighted=True).count() >= 10:
@@ -107,6 +110,36 @@ def validate_subject_hierarchy_length(parent):
 def validate_subject_provider_mapping(provider, mapping):
     if not mapping and provider._id != 'osf':
         raise DjangoValidationError('Invalid PreprintProvider / Subject alias mapping.')
+
+def validate_subjects(subject_list):
+    """
+    Asserts all subjects in subject_list are valid subjects
+    :param subject_list list[Subject._id] List of flattened subject ids
+    :return Subject queryset
+    """
+    from osf.models import Subject
+    subjects = Subject.objects.filter(_id__in=subject_list)
+    if subjects.count() != len(subject_list):
+        raise ValidationValueError('Subject not found.')
+    return subjects
+
+def expand_subject_hierarchy(subject_list):
+    """
+    Takes flattened subject list which may or may not include all parts
+    of the subject hierarchy and supplements with all the parents
+
+    :param subject_list list[Subject._id] List of flattened subjects
+    :return list of flattened subjects, supplemented with parents
+    """
+    subjects = validate_subjects(subject_list)
+    expanded_subjects = []
+    for subj in subjects:
+        expanded_subjects.append(subj)
+        while subj.parent:
+            if subj.parent not in expanded_subjects:
+                expanded_subjects.append(subj.parent)
+            subj = subj.parent
+    return expanded_subjects
 
 def validate_subject_hierarchy(subject_hierarchy):
     from osf.models import Subject

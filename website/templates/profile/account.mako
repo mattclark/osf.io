@@ -82,6 +82,26 @@
                         </table>
                     </div>
                 </div>
+                % if storage_flag_is_active:
+                    <div class="panel panel-default">
+                        <div class="panel-heading clearfix"><h3 class="panel-title">Default Storage Location</h3></div>
+                        <div class="panel-body">
+                            <form id="updateDefaultStorageLocation" data-bind="submit: $root.updateDefaultStorageLocation.bind($root)" role="form">
+                                <div class="form-group">
+                                    <select class="form-control" data-bind="options: locations, value: locationSelected, optionsText: function(item) { return item.name }">
+                                    </select>
+                                    <div class="help-block">
+                                        <p>
+                                            This location will be applied to new projects and components. It will not affect existing projects and components.
+                                        </p>
+                                    </div>
+                                </div>
+                                <p class="text-muted"></p>
+                                <button class="btn btn-primary" type="submit">Update location</button>
+                            </form>
+                        </div>
+                    </div>
+                % endif
                 <div id="externalIdentity" class="panel panel-default">
                     <div class="panel-heading clearfix"><h3 class="panel-title">Connected Identities</h3></div>
                     <div class="panel-body">
@@ -108,7 +128,7 @@
                                 <td>
                                     <a data-bind="click: $root.removeIdentity.bind($root, '${id}')"><i class="fa fa-times text-danger pull-right"></i></a>
                                 </td>
-                            </tr></div>                    
+                            </tr></div>
                             % if not loop.last:
                             <hr />
                             % endif
@@ -216,15 +236,11 @@
                 <div id="deactivateAccount" class="panel panel-default">
                     <div class="panel-heading clearfix"><h3 class="panel-title">Deactivate Account</h3></div>
                     <div class="panel-body">
-                        %if not requested_deactivation:
-                            <p class="alert alert-warning"><strong>Warning:</strong> This action is irreversible.</p>
-                        %endif
+                        <p class="alert alert-warning"><strong>Warning:</strong> Once your deactivation has been approved the effects are irreversible.</p>
                         <p>Deactivating your account will remove you from all public projects to which you are a contributor. Your account will no longer be associated with OSF projects, and your work on the OSF will be inaccessible.</p>
-                        %if not requested_deactivation:
-                             <a class="btn btn-danger" data-bind="click: submit, css: success() === true ? 'disabled' : ''">Request deactivation</a>
-                        %else:
-                             <p><b>Your account is currently pending deactivation.</b></p>
-                        %endif
+                        <p data-bind="click: cancel, visible: requestPending()"><b>Your account is currently pending deactivation.</b></p>
+                        <a class="btn btn-danger" data-bind="click: submit, visible: !requestPending()">Request deactivation</a>
+                        <a class="btn btn-success" data-bind="click: cancel, visible: requestPending()">Cancel deactivation request</a>
                     </div>
                 </div>
             </div>
@@ -251,7 +267,8 @@
 <%def name="javascript_bottom()">
     <script type="text/javascript">
         window.contextVars = $.extend(true, {}, window.contextVars, {
-            username: ${user_name | sjson, n}
+            username: ${user_name | sjson, n},
+            requestedDeactivation: ${requested_deactivation | sjson, n}
         });
     </script>
     ${parent.javascript_bottom()}

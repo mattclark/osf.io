@@ -4,7 +4,8 @@ from django.db import models
 class AdminProfile(models.Model):
     primary_identifier_name = 'id'
 
-    user = models.OneToOneField('osf.OSFUser', related_name='admin_profile')
+    user = models.OneToOneField('osf.OSFUser', related_name='admin_profile',
+                                on_delete=models.CASCADE)
 
     desk_token = models.CharField(max_length=45, blank=True)
     desk_token_secret = models.CharField(max_length=45, blank=True)
@@ -21,4 +22,6 @@ class AdminProfile(models.Model):
             ('view_prereg', 'Can view entries for the preregistration chellenge on the admin'),
             ('administer_prereg', 'Can update, comment on, and approve entries to the prereg challenge'),
             ('view_desk', 'Can view details about Desk users'),
+            ('delete_preprintrequest', 'Can delete preprints withdrawal requests'),
+            ('change_preprintrequest', 'Can update preprints withdrawal requests'),
         )

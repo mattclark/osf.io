@@ -2,18 +2,23 @@
 import requests
 
 from framework.auth import Auth
-
-from website import util
+from addons.wiki.models import WikiPage
 from website import settings
 from osf.models import MailRecord
+from api.base.utils import waterbutler_api_url_for
+from osf.exceptions import NodeStateError
+from osf.utils.permissions import ADMIN
+from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 
 
-def record_message(message, nodes_created, users_created):
+def record_message(message, node_created, user_created):
     record = MailRecord.objects.create(
         data=message.raw,
     )
-    record.users_created.add(*users_created),
-    record.nodes_created.add(*nodes_created)
+    if user_created:
+        record.users_created.add(user_created)
+    record.nodes_created.add(node_created)
     record.save()
 
 
@@ -25,15 +30,19 @@ def provision_node(conference, message, node, user):
     :param User user:
     """
     auth = Auth(user=user)
+    try:
+        wiki = WikiPage.objects.create_for_node(node, 'home', message.text, auth)
+    except NodeStateError:
+        wiki = WikiPage.objects.get_for_node(node, 'home')
+        wiki.update(user, message.text)
 
-    node.update_node_wiki('home', message.text, auth)
     if conference.admins.exists():
         node.add_contributors(prepare_contributors(conference.admins.all()), log=False)
 
     if not message.is_spam and conference.public_projects:
         node.set_privacy('public', meeting_creation=True, auth=auth)
 
-    node.add_tag(message.conference_name, auth=auth)
+    conference.submissions.add(node)
     node.add_tag(message.conference_category, auth=auth)
     for systag in ['emailed', message.conference_name, message.conference_category]:
         node.add_system_tag(systag, save=False)
@@ -47,7 +56,7 @@ def prepare_contributors(admins):
     return [
         {
             'user': admin,
-            'permissions': ['read', 'write', 'admin'],
+            'permissions': ADMIN,
             'visible': False,
         }
         for admin in admins
@@ -56,9 +65,9 @@ def prepare_contributors(admins):
 
 def upload_attachment(user, node, attachment):
     attachment.seek(0)
-    name = '/' + (attachment.filename or settings.MISSING_FILE_NAME)
+    name = (attachment.filename or settings.MISSING_FILE_NAME)
     content = attachment.read()
-    upload_url = util.waterbutler_url_for('upload', 'osfstorage', name, node, user=user, _internal=True)
+    upload_url = waterbutler_api_url_for(node._id, 'osfstorage', name=name, base_url=node.osfstorage_region.waterbutler_url, cookie=user.get_or_create_cookie(), _internal=True)
 
     requests.put(
         upload_url,
@@ -69,3 +78,11 @@ def upload_attachment(user, node, attachment):
 def upload_attachments(user, node, attachments):
     for attachment in attachments:
         upload_attachment(user, node, attachment)
+
+
+def is_valid_email(email):
+    try:
+        validate_email(email)
+        return True
+    except ValidationError:
+        return False

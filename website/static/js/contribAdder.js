@@ -111,10 +111,6 @@ AddContributorViewModel = oop.extend(Paginator, {
             return self.query() && self.results().length && !self.parentImport();
         });
 
-        self.parentPagination = ko.pureComputed(function () {
-            return self.doneSearching() && self.parentImport();
-        });
-
         self.noResults = ko.pureComputed(function () {
             return self.query() && !self.results().length && self.doneSearching();
         });
@@ -275,6 +271,12 @@ AddContributorViewModel = oop.extend(Paginator, {
                 var contributors = result.contributors.map(function (user) {
                     var added = (self.contributors().indexOf(user.id) !== -1);
                     var updatedUser = $.extend({}, user, {added: added});
+
+                    var user_permission = self.permissionList.find(function (permission) {
+                        return permission.value === user.permission;
+                    });
+                    updatedUser.permission = ko.observable(user_permission);
+
                     return updatedUser;
                 });
                 var pageToShow = [];
@@ -289,10 +291,7 @@ AddContributorViewModel = oop.extend(Paginator, {
                     }
                 }
                 self.doneSearching(true);
-                self.results(pageToShow);
-                self.currentPage(self.pageToGet());
-                self.numberOfPages(Math.ceil(contributors.length/5));
-                self.addNewPaginators(true);
+                self.selection(contributors);
             }
         );
     },
@@ -320,7 +319,7 @@ AddContributorViewModel = oop.extend(Paginator, {
         if (!self.inviteName().trim().length) {
             return 'Full Name is required.';
         }
-        if (self.inviteEmail() && !$osf.isEmail(self.inviteEmail())) {
+        if (self.inviteEmail() && !$osf.isEmail(self.inviteEmail().replace(/^\s+|\s+$/g, ''))) {
             return 'Not a valid email address.';
         }
         // Make sure that entered email is not already in selection
@@ -342,9 +341,10 @@ AddContributorViewModel = oop.extend(Paginator, {
         var validated = self.validateInviteForm();
         if (typeof validated === 'string') {
             self.inviteError(validated);
+            self.canSubmit(true);
             return false;
         }
-        return self.postInviteRequest(self.inviteName(), self.inviteEmail());
+        return self.postInviteRequest(self.inviteName(), self.inviteEmail().replace(/^\s+|\s+$/g, ''));
     },
     add: function (data) {
         var self = this;
@@ -352,6 +352,7 @@ AddContributorViewModel = oop.extend(Paginator, {
         // All manually added contributors are visible
         data.visible = true;
         this.selection.push(data);
+        self.query('');
         // Hack: Hide and refresh tooltips
         $('.tooltip').hide();
         $('.contrib-button').tooltip();
@@ -374,6 +375,7 @@ AddContributorViewModel = oop.extend(Paginator, {
                 self.add(result);
             }
         });
+        self.query('');
     },
     removeAll: function () {
         var self = this;
@@ -416,6 +418,7 @@ AddContributorViewModel = oop.extend(Paginator, {
     },
     submit: function () {
         var self = this;
+        self.canSubmit(false);
         $osf.block();
         var url = self.nodeApiUrl + 'contributors/';
         return $osf.postJSON(
@@ -433,8 +436,6 @@ AddContributorViewModel = oop.extend(Paginator, {
                 self.contributors($.map(response.contributors, function (contrib) {
                     return contrib.id;
                 }));
-                self.hide();
-                $osf.unblock();
                 if (self.callback) {
                     self.callback(response);
                 }
@@ -442,8 +443,6 @@ AddContributorViewModel = oop.extend(Paginator, {
                 window.location.reload();
             }
         }).fail(function (xhr, status, error) {
-            self.hide();
-            $osf.unblock();
             var errorMessage = lodashGet(xhr, 'responseJSON.message') || ('There was a problem trying to add contributors.' + osfLanguage.REFRESH_OR_SUPPORT);
             $osf.growl('Could not add contributors', errorMessage);
             Raven.captureMessage('Error adding contributors', {
@@ -453,6 +452,10 @@ AddContributorViewModel = oop.extend(Paginator, {
                     error: error
                 }
             });
+        }).always(function () {
+            self.hide();
+            $osf.unblock();
+            self.canSubmit(true);
         });
     },
     clear: function () {

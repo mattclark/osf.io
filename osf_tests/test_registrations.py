@@ -2,19 +2,21 @@ import mock
 import pytest
 import datetime
 
+from addons.wiki.models import WikiVersion
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from framework.auth.core import Auth
-from osf.models import Node, Registration, Sanction, MetaSchema, NodeLog
-from addons.wiki.models import NodeWikiPage
-from osf.modm_compat import Q
+from framework.exceptions import PermissionsError
+from osf.models import Node, Registration, Sanction, RegistrationSchema, NodeLog
+from addons.wiki.models import WikiPage
+from osf.utils.permissions import ADMIN
 
 from website import settings
-from website.util.permissions import READ, WRITE, ADMIN
 
 from . import factories
 from .utils import assert_datetime_equal, mock_archive
 from .factories import get_default_metaschema
-from addons.wiki.tests.factories import NodeWikiFactory
+from addons.wiki.tests.factories import WikiFactory, WikiVersionFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -63,6 +65,44 @@ def test_factory(user, project):
         registration2.registered_meta[get_default_metaschema()._id] ==
         {'some': 'data'}
     )
+
+
+class TestRegistration:
+
+    def test_registered_schema_id(self):
+        reg = factories.RegistrationFactory()
+        assert reg.registered_schema_id == reg.registered_schema.get()._id
+
+    # Regression test for https://openscience.atlassian.net/browse/PLAT-776
+    # Some very old registrations on prod don't have a schema
+    def test_registered_schema_id_with_no_schema(self):
+        reg = factories.RegistrationFactory()
+        reg.registered_schema.clear()
+        assert reg.registered_schema_id is None
+
+    def test_update_category(self, auth):
+        reg = factories.RegistrationFactory(category='instrumentation')
+        new_category = 'software'
+        reg.update({'category': new_category}, auth=auth)
+        assert reg.category == new_category
+
+        last_log = reg.logs.latest()
+        assert last_log.action == NodeLog.CATEGORY_UPDATED
+        assert last_log.params['category_new'] == new_category
+        assert last_log.params['category_original'] == 'instrumentation'
+
+    def test_update_article_doi(self, auth):
+        reg = factories.RegistrationFactory()
+        reg.article_doi = '10.1234/giraffe'
+        reg.save()
+        new_article_doi = '10.12345/elephant'
+        reg.update({'article_doi': new_article_doi}, auth=auth)
+        assert reg.article_doi == new_article_doi
+
+        last_log = reg.logs.latest()
+        assert last_log.action == NodeLog.ARTICLE_DOI_UPDATED
+        assert last_log.params['article_doi_new'] == new_article_doi
+        assert last_log.params['article_doi_original'] == '10.1234/giraffe'
 
 
 # copied from tests/test_models.py
@@ -210,9 +250,9 @@ class TestRegisterNode:
 
         # Share the project and some nodes
         user2 = factories.UserFactory()
-        project.add_contributor(user2, permissions=(READ, WRITE, ADMIN))
-        shared_component.add_contributor(user2, permissions=(READ, WRITE, ADMIN))
-        shared_subproject.add_contributor(user2, permissions=(READ, WRITE, ADMIN))
+        project.add_contributor(user2, permissions=ADMIN)
+        shared_component.add_contributor(user2, permissions=ADMIN)
+        shared_subproject.add_contributor(user2, permissions=ADMIN)
 
         # Partial contributor registers the node
         registration = factories.RegistrationFactory(project=project, user=user2)
@@ -228,7 +268,8 @@ class TestRegisterNode:
         assert registration.is_registration
 
     def test_registered_date(self, registration):
-        assert_datetime_equal(registration.registered_date, timezone.now(), allowance=3000)
+        # allowance increased in OSF-9050, if this fails sporadically again then registrations may need to be optimized or this test reworked
+        assert_datetime_equal(registration.registered_date, timezone.now(), allowance=10000)
 
     def test_registered_addons(self, registration):
         assert (
@@ -239,7 +280,7 @@ class TestRegisterNode:
     def test_registered_user(self, project):
         # Add a second contributor
         user2 = factories.UserFactory()
-        project.add_contributor(user2, permissions=(READ, WRITE, ADMIN))
+        project.add_contributor(user2, permissions=ADMIN)
         # Second contributor registers project
         registration = factories.RegistrationFactory(parent=project, user=user2)
         assert registration.registered_user == user2
@@ -273,30 +314,83 @@ class TestRegisterNode:
         )
 
     def test_registration_of_project_with_no_wiki_pages(self, registration):
-        assert registration.wiki_pages_versions == {}
-        assert registration.wiki_pages_current == {}
+        assert WikiPage.objects.get_wiki_pages_latest(registration).exists() is False
+        assert registration.wikis.all().exists() is False
         assert registration.wiki_private_uuids == {}
 
     @mock.patch('website.project.signals.after_create_registration')
     def test_registration_clones_project_wiki_pages(self, mock_signal, project, user):
         project = factories.ProjectFactory(creator=user, is_public=True)
-        wiki = NodeWikiFactory(node=project)
-        current_wiki = NodeWikiFactory(node=project, version=2)
+        wiki_page = WikiFactory(
+            user=user,
+            node=project,
+        )
+        wiki = WikiVersionFactory(
+            wiki_page=wiki_page,
+        )
+        current_wiki = WikiVersionFactory(
+            wiki_page=wiki_page,
+            identifier=2
+        )
         registration = project.register_node(get_default_metaschema(), Auth(user), '', None)
         assert registration.wiki_private_uuids == {}
 
-        registration_wiki_current = NodeWikiPage.load(registration.wiki_pages_current[current_wiki.page_name])
-        assert registration_wiki_current.node == registration
+        registration_wiki_current = WikiVersion.objects.get_for_node(registration, current_wiki.wiki_page.page_name)
+        assert registration_wiki_current.wiki_page.node == registration
         assert registration_wiki_current._id != current_wiki._id
+        assert registration_wiki_current.identifier == 2
 
-        registration_wiki_version = NodeWikiPage.load(registration.wiki_pages_versions[wiki.page_name][0])
-        assert registration_wiki_version.node == registration
+        registration_wiki_version = WikiVersion.objects.get_for_node(registration, wiki.wiki_page.page_name, version=1)
+        assert registration_wiki_version.wiki_page.node == registration
         assert registration_wiki_version._id != wiki._id
+        assert registration_wiki_version.identifier == 1
 
     def test_legacy_private_registrations_can_be_made_public(self, registration, auth):
         registration.is_public = False
         registration.set_privacy(Node.PUBLIC, auth=auth)
         assert registration.is_public
+
+
+class TestRegisterNodeContributors:
+
+    @pytest.fixture()
+    def project_two(self, user, auth):
+        return factories.ProjectFactory(creator=user)
+
+    @pytest.fixture()
+    def component(self, user, auth, project_two):
+        return factories.NodeFactory(
+            creator=user,
+            parent=project_two,
+        )
+
+    @pytest.fixture()
+    def contributor_unregistered(self, user, auth, project_two):
+        ret = project_two.add_unregistered_contributor(fullname='Johnny Git Gud', email='ford.prefect@hitchhikers.com', auth=auth)
+        project_two.save()
+        return ret
+
+    @pytest.fixture()
+    def contributor_unregistered_no_email(self, user, auth, project_two, component):
+        ret = component.add_unregistered_contributor(fullname='Johnny B. Bard', email='', auth=auth)
+        component.save()
+        return ret
+
+    @pytest.fixture()
+    def registration(self, project_two, component, contributor_unregistered, contributor_unregistered_no_email):
+        with mock_archive(project_two, autoapprove=True) as registration:
+            return registration
+
+    def test_unregistered_contributors_unclaimed_records_get_copied(self, user, project, component, registration, contributor_unregistered, contributor_unregistered_no_email):
+        contributor_unregistered.refresh_from_db()
+        contributor_unregistered_no_email.refresh_from_db()
+        assert registration.contributors.filter(id=contributor_unregistered.id).exists()
+        assert registration._id in contributor_unregistered.unclaimed_records
+
+        # component
+        component_registration = registration.nodes[0]
+        assert component_registration.contributors.filter(id=contributor_unregistered_no_email.id).exists()
+        assert component_registration._id in contributor_unregistered_no_email.unclaimed_records
 
 
 # copied from tests/test_registrations
@@ -308,22 +402,22 @@ class TestNodeSanctionStates:
 
     def test_sanction_embargo_termination_first(self):
         embargo_termination_approval = factories.EmbargoTerminationApprovalFactory()
-        registration = Registration.find_one(Q('embargo_termination_approval', 'eq', embargo_termination_approval))
+        registration = Registration.objects.get(embargo_termination_approval=embargo_termination_approval)
         assert registration.sanction == embargo_termination_approval
 
     def test_sanction_retraction(self):
         retraction = factories.RetractionFactory()
-        registration = Registration.find_one(Q('retraction', 'eq', retraction))
+        registration = Registration.objects.get(retraction=retraction)
         assert registration.sanction == retraction
 
     def test_sanction_embargo(self):
         embargo = factories.EmbargoFactory()
-        registration = Registration.find_one(Q('embargo', 'eq', embargo))
+        registration = Registration.objects.get(embargo=embargo)
         assert registration.sanction == embargo
 
     def test_sanction_registration_approval(self):
         registration_approval = factories.RegistrationApprovalFactory()
-        registration = Registration.find_one(Q('registration_approval', 'eq', registration_approval))
+        registration = Registration.objects.get(registration_approval=registration_approval)
         assert registration.sanction == registration_approval
 
     def test_sanction_searches_parents(self):
@@ -338,7 +432,7 @@ class TestNodeSanctionStates:
 
     def test_is_pending_registration(self):
         registration_approval = factories.RegistrationApprovalFactory()
-        registration = Registration.find_one(Q('registration_approval', 'eq', registration_approval))
+        registration = Registration.objects.get(registration_approval=registration_approval)
         assert registration_approval.is_pending_approval
         assert registration.is_pending_registration
 
@@ -353,7 +447,7 @@ class TestNodeSanctionStates:
 
     def test_is_registration_approved(self):
         registration_approval = factories.RegistrationApprovalFactory(state=Sanction.APPROVED, approve=True)
-        registration = Registration.find_one(Q('registration_approval', 'eq', registration_approval))
+        registration = Registration.objects.get(registration_approval=registration_approval)
         assert registration.is_registration_approved
 
     def test_is_registration_approved_searches_parents(self):
@@ -369,7 +463,7 @@ class TestNodeSanctionStates:
 
     def test_is_retracted(self):
         retraction = factories.RetractionFactory(state=Sanction.APPROVED, approve=True)
-        registration = Registration.find_one(Q('retraction', 'eq', retraction))
+        registration = Registration.objects.get(retraction=retraction)
         assert registration.is_retracted
 
     @mock.patch('website.project.tasks.send_share_node_data')
@@ -385,7 +479,7 @@ class TestNodeSanctionStates:
 
     def test_is_pending_retraction(self):
         retraction = factories.RetractionFactory()
-        registration = Registration.find_one(Q('retraction', 'eq', retraction))
+        registration = Registration.objects.get(retraction=retraction)
         assert retraction.is_pending_approval is True
         assert registration.is_pending_retraction is True
 
@@ -401,7 +495,7 @@ class TestNodeSanctionStates:
 
     def test_embargo_end_date(self):
         embargo = factories.EmbargoFactory()
-        registration = Registration.find_one(Q('embargo', 'eq', embargo))
+        registration = Registration.objects.get(embargo=embargo)
         assert registration.embargo_end_date == embargo.embargo_end_date
 
     def test_embargo_end_date_searches_parents(self):
@@ -415,7 +509,7 @@ class TestNodeSanctionStates:
 
     def test_is_pending_embargo(self):
         embargo = factories.EmbargoFactory()
-        registration = Registration.find_one(Q('embargo', 'eq', embargo))
+        registration = Registration.objects.get(embargo=embargo)
         assert embargo.is_pending_approval
         assert registration.is_pending_embargo
 
@@ -430,7 +524,7 @@ class TestNodeSanctionStates:
 
     def test_is_embargoed(self):
         embargo = factories.EmbargoFactory()
-        registration = Registration.find_one(Q('embargo', 'eq', embargo))
+        registration = Registration.objects.get(embargo=embargo)
         registration.embargo.state = Sanction.APPROVED
         registration.embargo.save()
         assert registration.is_embargoed
@@ -443,6 +537,31 @@ class TestNodeSanctionStates:
         with mock_archive(node, embargo=True, autoapprove=True) as registration:
             sub_reg = registration._nodes.first()._nodes.first()
             assert sub_reg.is_embargoed
+
+
+@pytest.mark.enable_implicit_clean
+class TestDOIValidation:
+
+    def test_validate_bad_doi(self):
+        reg = factories.RegistrationFactory()
+
+        with pytest.raises(ValidationError):
+            reg.article_doi = 'nope'
+            reg.save()
+        with pytest.raises(ValidationError):
+            reg.article_doi = 'https://dx.doi.org/10.123.456'
+            reg.save()  # should save the bare DOI, not a URL
+        with pytest.raises(ValidationError):
+            reg.article_doi = 'doi:10.10.1038/nwooo1170'
+            reg.save()  # should save without doi: prefix
+
+    def test_validate_good_doi(self):
+        reg = factories.RegistrationFactory()
+
+        doi = '10.11038/nwooo1170'
+        reg.article_doi = doi
+        reg.save()
+        assert reg.article_doi == doi
 
 
 class TestDraftRegistrations:
@@ -464,9 +583,7 @@ class TestDraftRegistrations:
         assert draft.initiator == node.creator
 
         # Pick an arbitrary v2 schema
-        schema = MetaSchema.find(
-            Q('schema_version', 'eq', 2)
-        )[0]
+        schema = RegistrationSchema.objects.filter(schema_version=2).first()
         data = {'some': 'data'}
         draft = factories.DraftRegistrationFactory(registration_schema=schema, registration_metadata=data)
         assert draft.registration_schema == schema
@@ -481,6 +598,17 @@ class TestDraftRegistrations:
         assert not draft.registered_node
         draft.register(auth)
         assert draft.registered_node
+
+        # group member with admin access cannot register
+        member = factories.AuthUserFactory()
+        osf_group = factories.OSFGroupFactory(creator=user)
+        osf_group.make_member(member, auth=auth)
+        project.add_osf_group(osf_group, ADMIN)
+        draft_2 = factories.DraftRegistrationFactory(branched_from=project)
+        assert project.has_permission(member, ADMIN)
+        with pytest.raises(PermissionsError):
+            draft_2.register(Auth(member))
+        assert not draft_2.registered_node
 
     def test_update_metadata_tracks_changes(self, project):
         draft = factories.DraftRegistrationFactory(branched_from=project)

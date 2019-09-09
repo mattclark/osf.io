@@ -4,15 +4,15 @@
  * Remember to embed original_node, user, linked_node and template_node in api call i.e. var url = $osf.apiV2Url('nodes/' + nodeId + '/logs/', { query : { 'embed' : ['original_node', 'user']}});
  */
 var m = require('mithril'); // exposes mithril methods, useful for redraw etc.
-var logActions = require('json!js/_allLogTexts.json');
-var anonymousLogActions = require('json!js/_anonymousLogTexts.json');
+var logActions = require('json-loader!js/_allLogTexts.json');
+var anonymousLogActions = require('json-loader!js/_anonymousLogTexts.json');
 var $ = require('jquery');  // jQuery
 var $osf = require('js/osfHelpers');
 var Raven = require('raven-js');
 var lodashGet = require('lodash.get');
 
 var ravenMessagesCache = []; // Cache messages to avoid sending multiple times in one page view
-var nodeCategories = require('json!built/nodeCategories.json');
+var nodeCategories = require('json-loader!built/nodeCategories.json');
 
 //Used when calling getContributorList to limit the number of contributors shown in a single log when many are mentioned
 var numContributorsShown = 3;
@@ -92,6 +92,7 @@ var returnTextParams = function (param, text, logObject, view_url) {
         if (type === 'wiki_updated' && source === 'home') {
             source = 'Home';
         }
+        source = $osf.decodeText(source);
         return view_url ? m('a', {href: $osf.toRelativeUrl(view_url, window)}, source) : m('span', source);
     }
     return m('span', text);
@@ -238,23 +239,23 @@ var LogPieces = {
             // Log action is node_removed
             if (logObject.attributes.action === 'node_removed') {
                 if (logObject.attributes.params.params_node) {
-                    return m('span', logObject.attributes.params.params_node.title);
+                    return m('span', $osf.decodeText(logObject.attributes.params.params_node.title));
             }}
             else if(paramIsReturned(nodeObject, logObject) && nodeObject.data){
                 if (nodeObject.data.links && nodeObject.data.attributes) {
                     return m('a', {href: $osf.toRelativeUrl(nodeObject.data.links.html, window), onclick: function() {
                         $osf.trackClick(logObject.trackingCategory, logObject.trackingAction, 'navigate-to-project-from-logs');
-                    }}, nodeObject.data.attributes.title);
+                    }}, $osf.decodeText(nodeObject.data.attributes.title));
                 }
                 else if (nodeObject.data.attributes) {
-                    return m('span', nodeObject.data.attributes.title);
+                    return m('span', $osf.decodeText(nodeObject.data.attributes.title));
                 }
             }
             // Original node has been deleted
             else if (!paramIsReturned(nodeObject, logObject)) {
                 var deletedNode = logObject.attributes.params.params_node;
                 if (paramIsReturned(deletedNode, logObject)){
-                     return m('span', deletedNode.title);
+                     return m('span', $osf.decodeText(deletedNode.title));
                 }
             }
             return m('span', 'a project');
@@ -286,7 +287,7 @@ var LogPieces = {
         view: function(ctrl, logObject) {
             var forkedFrom = logObject.attributes.params.params_node;
             var id = forkedFrom.id;
-            var title = forkedFrom.title;
+            var title = $osf.decodeText(forkedFrom.title);
             if (paramIsReturned(forkedFrom, logObject) && title){
                 if (id) {
                     return m('a', {href: '/' + id + '/' }, title);
@@ -296,40 +297,49 @@ var LogPieces = {
             return m('span', 'a project');
         }
     },
+    // OSF Group attached to node
+    group: {
+        view: function (ctrl, logObject) {
+            var group = logObject.embeds.group;
+            if (group && paramIsReturned(group, logObject) && !group.errors) {
+                return m('span', $osf.decodeText(group.data.attributes.name));
+            }
+            return m('span', 'a group');
+        }
+    },
     // Node that is linked to the node involved
     pointer: {
         view: function (ctrl, logObject) {
             var linked_node = logObject.embeds.linked_node;
-            if(paramIsReturned(linked_node, logObject)){
-                return m('a', {href: $osf.toRelativeUrl(linked_node.data.links.html, window)}, linked_node.data.attributes.title);
+            if (linked_node && paramIsReturned(linked_node, logObject) && !linked_node.errors) {
+                return m('a', {href: $osf.toRelativeUrl(linked_node.data.links.html, window)}, $osf.decodeText(linked_node.data.attributes.title));
             }
-            // Applicable when pointer has been deleted
-            var pointer_info = logObject.attributes.params.pointer;
-            if (paramIsReturned(pointer_info, logObject)) {
-                return m('span', pointer_info.title);
+            var linked_registration = logObject.embeds.linked_registration;
+            if (linked_registration && paramIsReturned(linked_registration, logObject) && !linked_registration.errors) {
+                return m('a', {href: $osf.toRelativeUrl(linked_registration.data.links.html, window)}, $osf.decodeText(linked_registration.data.attributes.title));
             }
-            return m('span','a project');
+            return m('span', 'a project');
         }
     },
     // Pointer category
     pointer_category: {
         view: function (ctrl, logObject) {
             var linked_node = logObject.embeds.linked_node;
-            if(paramIsReturned(linked_node, logObject)){
-                var category = linked_node.data.attributes.category;
+            var category = '';
+            if (linked_node && paramIsReturned(linked_node, logObject) && !linked_node.errors) {
+                category = linked_node.data.attributes.category;
                 if (category !== '') {
                     return m('span', linked_node.data.attributes.category);
                 }
             }
-
-            var linkedNodeParams = logObject.attributes.params.pointer;
-            if (paramIsReturned(linkedNodeParams, logObject)) {
-                if (linkedNodeParams.category !== '') {
-                     return m('span', linkedNodeParams.category);
+            var linked_registration = logObject.embeds.linked_registration;
+            if (linked_registration && paramIsReturned(linked_registration, logObject) && !linked_registration.errors) {
+                category = linked_registration.data.attributes.category;
+                if (category !== '') {
+                    return m('span', linked_registration.data.attributes.category);
                 }
-
             }
-            return m('span','project');
+            return m('span', '');
         }
     },
     // Node that acted as template to create a new node involved
@@ -338,12 +348,12 @@ var LogPieces = {
             var template_node = logObject.embeds.template_node;
 
             if(paramIsReturned(template_node, logObject)){
-                return m('a', {href: $osf.toRelativeUrl(template_node.data.links.html, window)}, template_node.data.attributes.title);
+                return m('a', {href: $osf.toRelativeUrl(template_node.data.links.html, window)}, $osf.decodeText(template_node.data.attributes.title));
             }
 
             var templateFromParams = logObject.attributes.params.template_node;
                 if (paramIsReturned(templateFromParams, logObject && templateFromParams.title)){
-                    return m('span', templateFromParams.title);
+                    return m('span', $osf.decodeText(templateFromParams.title));
                 }
             return m('span','a project' );
         }
@@ -540,6 +550,12 @@ var LogPieces = {
         }
     },
 
+    library_name: {
+        view: function(ctrl, logObject) {
+            return returnTextParams('library_name', 'a library', logObject);
+        }
+    },
+
     bucket: {
         view: function(ctrl, logObject) {
             return returnTextParams('bucket', 'a bucket', logObject);
@@ -570,6 +586,17 @@ var LogPieces = {
 
             if(paramIsReturned(folder, logObject)){
                 return m('span', folder === '/' ? '/ (Full Dropbox)' : folder);
+            }
+            return m('span', '');
+        }
+    },
+
+    onedrive_folder: {
+        view: function(ctrl, logObject) {
+            var folder = logObject.attributes.params.folder;
+
+            if(paramIsReturned(folder, logObject)){
+                return m('span', folder === '/' ? '/ (Full OneDrive)' : folder);
             }
             return m('span', '');
         }
@@ -635,7 +662,7 @@ var LogPieces = {
 
     googledrive_folder: {
         view: function(ctrl, logObject){
-            var folder = logObject.attributes.params.folder;
+            var folder = logObject.attributes.params.folder_name;
             if(paramIsReturned(folder, logObject)){
                 return m('span', folder === '/' ? '(Full Google Drive)' : folder);
             }
@@ -701,6 +728,16 @@ var LogPieces = {
         }
     },
 
+    subjects: {
+        view: function(ctrl, logObject){
+            var subjects = logObject.attributes.params.subjects;
+            if (paramIsReturned(subjects, logObject)) {
+                return m('span', subjects.map(function(item) {return item.text;}).join(', '), '');
+            }
+            return m('span', '');
+        }
+    },
+
     license: {
         view: function(ctrl, logObject){
             var license_name = logObject.attributes.params.license;
@@ -718,7 +755,18 @@ var LogPieces = {
             }
             return m('span', 'a');
         }
-    }
+    },
+
+    gitlab_repo: {
+        view: function(ctrl, logObject){
+            var gitlab_user = logObject.attributes.params.gitlab_user;
+            var gitlab_repo = logObject.attributes.params.gitlab_repo;
+            if (paramIsReturned(gitlab_repo, logObject) && paramIsReturned(gitlab_user, logObject)) {
+                return m('span', gitlab_user + '/' + gitlab_repo);
+            }
+            return m('span', '');
+        }
+    },
 };
 
 module.exports = {

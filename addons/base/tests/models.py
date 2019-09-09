@@ -9,6 +9,7 @@ from framework.exceptions import HTTPError
 from nose.tools import (assert_equal, assert_false, assert_in, assert_is,
                         assert_is_none, assert_not_in, assert_raises,
                         assert_true)
+from osf.utils.permissions import ADMIN
 from osf_tests.factories import ProjectFactory, UserFactory
 from tests.utils import mock_auth
 from addons.base import exceptions
@@ -34,6 +35,7 @@ class OAuthAddonModelTestSuiteMixinBase(object):
         pass
 
 
+@pytest.mark.enable_quickfiles_creation
 class OAuthAddonUserSettingTestSuiteMixin(OAuthAddonModelTestSuiteMixinBase):
 
     def setUp(self):
@@ -183,7 +185,6 @@ class OAuthAddonNodeSettingsTestSuiteMixin(OAuthAddonModelTestSuiteMixinBase):
 
         self.user.add_addon(self.short_name)
         self.user.external_accounts.add(self.external_account)
-        self.user.save()
 
         self.user_settings = self.user.get_addon(self.short_name)
         self.user_settings.grant_oauth_access(
@@ -194,18 +195,9 @@ class OAuthAddonNodeSettingsTestSuiteMixin(OAuthAddonModelTestSuiteMixinBase):
         self.user_settings.save()
 
         self.node_settings = self.NodeSettingsFactory(
+            external_account=self.external_account,
             **self._node_settings_class_kwargs(self.node, self.user_settings)
         )
-        self.node_settings.external_account = self.external_account
-        self.node_settings.save()
-
-    def tearDown(self):
-        super(OAuthAddonNodeSettingsTestSuiteMixin, self).tearDown()
-        self.user_settings.remove()
-        self.node_settings.remove()
-        self.external_account.remove()
-        self.node.remove()
-        self.user.remove()
 
     @pytest.mark.django_db
     def test_configured_true(self):
@@ -523,7 +515,7 @@ class OAuthCitationsNodeSettingsTestSuiteMixin(
         # The first call to .api returns a new object
         with mock.patch.object(self.NodeSettingsClass, 'oauth_provider') as mock_api:
             api = self.node_settings.api
-            mock_api.assert_called_once()
+            mock_api.assert_called_once_with(account=self.external_account)
             assert_equal(api, mock_api())
 
     def test_api_cached(self):
@@ -603,7 +595,7 @@ class OAuthCitationsNodeSettingsTestSuiteMixin(
     @mock.patch('framework.status.push_status_message')
     def test_remove_contributor_authorizer(self, mock_push_status):
         contributor = UserFactory()
-        self.node.add_contributor(contributor, permissions=['read', 'write', 'admin'])
+        self.node.add_contributor(contributor, permissions=ADMIN)
         self.node.remove_contributor(self.node.creator, auth=Auth(user=contributor))
         self.node_settings.reload()
         self.user_settings.reload()
@@ -670,7 +662,7 @@ class CitationAddonProviderTestSuiteMixin(OAuthCitationsTestSuiteMixinBase):
             mock_account.expires_at = timezone.now()
             self.provider.account = mock_account
             self.provider.client
-            mock_get_client.assert_called
+            mock_get_client.assert_called_with()
             assert_true(mock_get_client.called)
 
     def test_client_cached(self):

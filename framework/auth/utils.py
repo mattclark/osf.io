@@ -4,8 +4,8 @@ import re
 from nameparser.parser import HumanName
 import requests
 
+from django.apps import apps
 from django.core.exceptions import ValidationError
-from modularodm import Q
 
 from website import settings
 
@@ -26,13 +26,15 @@ DOMAIN_REGEX = re.compile(
 
 
 def validate_email(email):
+    BlacklistedEmailDomain = apps.get_model('osf.BlacklistedEmailDomain')
     if len(email) > 254:
         raise ValidationError('Invalid Email')
 
     if not email or '@' not in email:
         raise ValidationError('Invalid Email')
 
-    if email.split('@')[1].lower() in settings.BLACKLISTED_DOMAINS:
+    domain = email.split('@')[1].lower()
+    if BlacklistedEmailDomain.objects.filter(domain=domain).exists():
         raise ValidationError('Invalid Email')
 
     user_part, domain_part = email.rsplit('@', 1)
@@ -89,8 +91,9 @@ def privacy_info_handle(info, anonymous, name=False):
 
 def ensure_external_identity_uniqueness(provider, identity, user=None):
     from osf.models import OSFUser
-
-    users_with_identity = OSFUser.find(Q('external_identity.{}.{}'.format(provider, identity), 'ne', None))
+    users_with_identity = OSFUser.objects.filter(
+        **{'external_identity__{}__{}__isnull'.format(provider, identity): False}
+    )
     for existing_user in users_with_identity:
         if user and user._id == existing_user._id:
             continue
@@ -131,6 +134,7 @@ def validate_recaptcha(response, remote_ip=None):
 def generate_csl_given_name(given_name, middle_names='', suffix=''):
     parts = [given_name]
     if middle_names:
+        middle_names = middle_names.strip()
         parts.extend(each[0] for each in re.split(r'\s+', middle_names))
     given = ' '.join(parts)
     if suffix:

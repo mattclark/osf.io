@@ -12,17 +12,17 @@
                         <span class="sr-only">Toggle navigation</span>
                         <span class="fa fa-bars fa-lg"></span>
                     </button>
-                    <a class="navbar-brand visible-xs" href="${node['url']}">
+                    <span class="navbar-brand visible-xs visible-sm">
                         ${'Project' if node['node_type'] == 'project' else 'Component'} Navigation
-                    </a>
+                    </span>
                 </div>
                 <div class="collapse navbar-collapse project-nav">
                     <ul class="nav navbar-nav">
 
                     % if parent_node['id']:
 
-                        % if parent_node['can_view'] or parent_node['is_public'] or parent_node['is_contributor']:
-                            <li><a href="${parent_node['url']}" data-toggle="tooltip" title="${parent_node['title']}" data-placement="bottom" style="padding: 12px 17px;"> <i class="fa fa-level-down fa-rotate-180"></i>  </a></li>
+                        % if parent_node['can_view'] or parent_node['is_public'] or parent_node['is_contributor_or_group_member']:
+                            <li><a href="${parent_node['url']}" data-toggle="tooltip" title="${parent_node['title']}" data-placement="bottom"> <i class="fa fa-level-down fa-rotate-180"></i>  </a></li>
 
                         % else:
                             <li><a href="#" data-toggle="tooltip" title="Parent project is private" data-placement="bottom" style="cursor: default"> <i class="fa fa-level-down fa-rotate-180 text-muted"></i>  </a></li>
@@ -56,7 +56,7 @@
                             % endif
                         % endfor
 
-                        % if node['is_public'] or user['is_contributor']:
+                        % if node['is_public'] or user['is_contributor_or_group_member']:
                             <li><a href="${node['url']}analytics/">Analytics</a></li>
                         % endif
 
@@ -64,21 +64,21 @@
                             <li><a href="${node['url']}registrations/">Registrations</a></li>
                         % endif
 
-                        % if not node['anonymous']:
-                            <li><a href="${node['url']}forks/">Forks</a></li>
-                        %endif
-
-                        % if user['is_contributor']:
+                        % if user['is_contributor_or_group_member']:
                             <li><a href="${node['url']}contributors/">Contributors</a></li>
                         % endif
 
-                        % if user['has_read_permissions'] and not node['is_registration'] or (node['is_registration'] and 'admin' in user['permissions']):
+                        % if permissions.WRITE in user['permissions'] and not node['is_registration']:
+                            <li><a href="${node['url']}addons/">Add-ons</a></li>
+                        % endif
+
+                        % if user['has_read_permissions'] and not node['is_registration'] or (node['is_registration'] and permissions.WRITE in user['permissions']):
                             <li><a href="${node['url']}settings/">Settings</a></li>
                         % endif
                     % endif
                     % if (user['can_comment'] or node['has_comments']) and not node['anonymous']:
                         <li id="commentsLink">
-                            <a href="" class="visible-xs cp-handle" data-bind="click:removeCount" data-toggle="collapse" data-target="#projectSubnav .navbar-collapse">
+                            <a href="" class="hidden-lg hidden-md cp-handle" data-bind="click:removeCount" data-toggle="collapse" data-target="#projectSubnav .navbar-collapse">
                                 Comments
                                 <span data-bind="if: unreadComments() !== 0">
                                     <span data-bind="text: displayCount" class="badge"></span>
@@ -99,6 +99,17 @@
         }
     </style>
 
+    %if maintenance:
+        <style type="text/css">
+            @media (max-width: 767px) {
+                #projectBanner .osf-project-navbar {
+                    position: absolute;
+                    top: 100px;
+                }
+            }
+        </style>
+    %endif
+
     % if node['is_registration']:  ## Begin registration undismissable labels
 
         % if not node['is_retracted']:
@@ -113,7 +124,7 @@
                 <div class="alert alert-info">
                     <div>This is a pending registration of <a class="link-solid" href="${node['registered_from_url']}">this ${node['node_type']}</a>, awaiting approval from project administrators. This registration will be final when all project administrators approve the registration or 48 hours pass, whichever comes first.</div>
 
-                    % if 'admin' in user['permissions']:
+                    % if 'permissions.ADMIN' in user['permissions']:
                         <div>
                             <br>
                             <button type="button" id="registrationCancelButton" class="btn btn-danger" data-toggle="modal" data-target="#registrationCancel">
@@ -145,7 +156,7 @@
         % if node['is_pending_embargo']:
             <div
                 class="alert alert-info">This ${node['node_type']} is currently pending registration, awaiting approval from project administrators. This registration will be final and enter the embargo period when all project administrators approve the registration or 48 hours pass, whichever comes first. The embargo will keep the registration private until the embargo period ends.
-                % if 'admin' in user['permissions']:
+                % if permissions.ADMIN in user['permissions']:
                         <div>
                             <br>
                             <button type="button" id="registrationCancelButton" class="btn btn-danger" data-toggle="modal" data-target="#registrationCancel">
@@ -163,15 +174,15 @@
 
     % endif  ## End registration undismissable labels
 
-    % if node['preprint_file_id'] and user['is_contributor'] and not node['is_public'] and node['has_published_preprint']:
-        <div class="alert alert-info">This ${node['node_type']} has a preprint, but has been made Private. Make your preprint discoverable by making this ${node['node_type']} Public.</div>
+    % if node['is_supplemental_project'] and user['is_contributor_or_group_member'] and not node['is_public']:
+        <div class="alert alert-info">This ${node['node_type']} contains supplemental materials for a preprint, but has been made Private. Make your supplemental materials discoverable by making this ${node['node_type']} Public.</div>
     % endif
 
-    % if node['anonymous'] and user['is_contributor']:
+    % if node['anonymous'] and user['is_contributor_or_group_member']:
         <div class="alert alert-info">This ${node['node_type']} is being viewed through an anonymized, view-only link. If you want to view it as a contributor, click <a class="link-solid" href="${node['redirect_url']}">here</a>.</div>
     % endif
 
-    % if node['link'] and not node['is_public'] and not user['is_contributor']:
+    % if node['link'] and not node['is_public'] and not user['is_contributor_or_group_member']:
         <div class="alert alert-info">This ${node['node_type']} is being viewed through a private, view-only link. Anyone with the link can view this project. Keep the link safe.</div>
     % endif
 

@@ -10,9 +10,11 @@ from osf_tests.factories import (
     UserFactory,
     RegistrationFactory,
     NodeFactory,
+    OSFGroupFactory,
     CollectionFactory,
 )
 from osf.models import NodeRelation
+from osf.utils import permissions
 from tests.base import OsfTestCase, get_default_metaschema
 
 from framework.auth import Auth
@@ -20,10 +22,11 @@ from website.project.views.node import _view_project, _serialize_node_search, _g
 from website.views import serialize_node_summary
 from website.profile import utils
 from website import filters, settings
-from website.util import permissions
 
 pytestmark = pytest.mark.django_db
 
+@pytest.mark.enable_bookmark_creation
+@pytest.mark.enable_quickfiles_creation
 class TestUserSerializers(OsfTestCase):
     def test_serialize_user(self):
         master = UserFactory()
@@ -50,22 +53,22 @@ class TestUserSerializers(OsfTestCase):
 
     def test_serialize_user_full(self):
         user = UserFactory()
-        ProjectFactory(creator=user, is_public=False)
+        project = ProjectFactory(creator=user, is_public=False)
         NodeFactory(creator=user)
         ProjectFactory(creator=user, is_public=True)
         CollectionFactory(creator=user)
+        RegistrationFactory(project=project)
         d = utils.serialize_user(user, full=True, include_node_counts=True)
-        gravatar = filters.gravatar(
-            user,
-            use_ssl=True,
-            size=settings.PROFILE_IMAGE_LARGE
-        )
+        profile_image_url = filters.profile_image_url(settings.PROFILE_IMAGE_PROVIDER,
+                                                  user,
+                                                  use_ssl=True,
+                                                  size=settings.PROFILE_IMAGE_LARGE)
         assert_equal(d['id'], user._primary_key)
         assert_equal(d['url'], user.url)
         assert_equal(d.get('username'), None)
         assert_equal(d['fullname'], user.fullname)
         assert_equal(d['registered'], user.is_registered)
-        assert_equal(d['gravatar_url'], gravatar)
+        assert_equal(d['profile_image_url'], profile_image_url)
         assert_equal(d['absolute_url'], user.absolute_url)
         assert_equal(d['date_registered'], user.date_registered.strftime('%Y-%m-%d'))
         projects = [
@@ -80,6 +83,7 @@ class TestUserSerializers(OsfTestCase):
         assert_equal(d['number_public_projects'], len(public_projects))
 
 
+@pytest.mark.enable_bookmark_creation
 class TestNodeSerializers(OsfTestCase):
 
     # Regression test for #489
@@ -122,21 +126,21 @@ class TestNodeSerializers(OsfTestCase):
         user = UserFactory()
         admin_project = ProjectFactory()
         admin_project.add_contributor(user, auth=Auth(admin_project.creator),
-                                      permissions=permissions.expand_permissions(permissions.ADMIN))
+                                      permissions=permissions.ADMIN)
         admin_project.save()
 
         admin_component = NodeFactory(parent=admin_project)
         admin_component.add_contributor(user, auth=Auth(admin_component.creator),
-                                        permissions=permissions.expand_permissions(permissions.ADMIN))
+                                        permissions=permissions.ADMIN)
         admin_component.save()
 
         read_and_write = NodeFactory(parent=admin_project)
         read_and_write.add_contributor(user, auth=Auth(read_and_write.creator),
-                                       permissions=permissions.expand_permissions(permissions.WRITE))
+                                       permissions=permissions.WRITE)
         read_and_write.save()
         read_only = NodeFactory(parent=admin_project)
         read_only.add_contributor(user, auth=Auth(read_only.creator),
-                                  permissions=permissions.expand_permissions(permissions.READ))
+                                  permissions=permissions.READ)
         read_only.save()
 
         non_contributor = NodeFactory(parent=admin_project)
@@ -175,6 +179,36 @@ class TestNodeSerializers(OsfTestCase):
         assert_false(res['can_view'])
         assert_true(res['is_fork'])
 
+    def test_serialize_node_summary_child_exists(self):
+        user = UserFactory()
+        parent_node = ProjectFactory(creator=user)
+        linked_node = ProjectFactory(creator=user)
+        result = _view_project(parent_node, Auth(user))
+        assert_equal(result['node']['child_exists'], False)
+        parent_node.add_node_link(linked_node, Auth(user), save=True)
+        result = _view_project(parent_node, Auth(user))
+        assert_equal(result['node']['child_exists'], False)
+        child_component = NodeFactory(creator=user, parent=parent_node)
+        result = _view_project(parent_node, Auth(user))
+        assert_equal(result['node']['child_exists'], True)
+
+    def test_serialize_node_summary_is_contributor_osf_group(self):
+        project = ProjectFactory()
+        user = UserFactory()
+        group = OSFGroupFactory(creator=user)
+        project.add_osf_group(group, permissions.WRITE)
+
+        res = _view_project(
+            project, auth=Auth(user),
+        )
+        assert_false(res['user']['is_contributor'])
+        assert_true(res['user']['is_contributor_or_group_member'])
+        assert_false(res['user']['is_admin'])
+        assert_true(res['user']['can_edit'])
+        assert_true(res['user']['has_read_permissions'])
+        assert_equal(set(res['user']['permissions']), set([permissions.READ, permissions.WRITE]))
+        assert_true(res['user']['can_comment'])
+
     def test_serialize_node_search_returns_only_visible_contributors(self):
         node = NodeFactory()
         non_visible_contributor = UserFactory()
@@ -186,6 +220,7 @@ class TestNodeSerializers(OsfTestCase):
         assert_false(serialized_node['etal'])
 
 
+@pytest.mark.enable_bookmark_creation
 class TestViewProject(OsfTestCase):
 
     def setUp(self):
@@ -200,7 +235,7 @@ class TestViewProject(OsfTestCase):
 
         assert_not_equal(result['node']['disapproval_link'], '')
         assert_in('/?token=', result['node']['disapproval_link'])
-        pending_reg.remove()
+        pending_reg.delete()
 
     def test_view_project_pending_registration_for_write_contributor_does_not_contain_cancel_link(self):
         write_user = UserFactory()
@@ -211,9 +246,22 @@ class TestViewProject(OsfTestCase):
         result = _view_project(pending_reg, Auth(write_user))
 
         assert_equal(result['node']['disapproval_link'], '')
-        pending_reg.remove()
+        pending_reg.delete()
+
+    def test_view_project_child_exists(self):
+        linked_node = ProjectFactory(creator=self.user)
+        result = _view_project(self.node, Auth(self.user))
+        assert_equal(result['node']['child_exists'], False)
+        self.node.add_node_link(linked_node, Auth(self.user), save=True)
+        result = _view_project(self.node, Auth(self.user))
+        assert_equal(result['node']['child_exists'], False)
+        child_component = NodeFactory(creator=self.user, parent=self.node)
+        result = _view_project(self.node, Auth(self.user))
+        assert_equal(result['node']['child_exists'], True)
 
 
+
+@pytest.mark.enable_bookmark_creation
 class TestViewProjectEmbeds(OsfTestCase):
 
     def setUp(self):
@@ -232,13 +280,6 @@ class TestViewProjectEmbeds(OsfTestCase):
         assert_equal(len(res['node']['forks']), 1)
 
         assert_equal(res['node']['forks'][0]['id'], fork._id)
-
-    # Regression test for https://github.com/CenterForOpenScience/osf.io/issues/1478
-    @mock.patch('website.archiver.tasks.archive')
-    def test_view_project_embed_registrations_includes_contribution_count(self, mock_archive):
-        self.project.register_node(get_default_metaschema(), Auth(user=self.project.creator), '', None)
-        data = _view_project(node=self.project, auth=Auth(self.project.creator), embed_registrations=True)
-        assert_is_not_none(data['node']['registrations'][0]['nlogs'])
 
     # Regression test
     def test_view_project_embed_registrations_sorted_by_registered_date_descending(self):
@@ -315,34 +356,34 @@ class TestGetReadableDescendants(OsfTestCase):
         userB = UserFactory(fullname='User B')
 
         project1 = ProjectFactory(creator=self.user, title='One')
-        project1.add_contributor(userA, auth=Auth(self.user), permissions=['read'])
-        project1.add_contributor(userB, auth=Auth(self.user), permissions=['read'])
+        project1.add_contributor(userA, auth=Auth(self.user), permissions=permissions.READ)
+        project1.add_contributor(userB, auth=Auth(self.user), permissions=permissions.READ)
 
         component2 = ProjectFactory(creator=self.user, title='Two')
-        component2.add_contributor(userA, auth=Auth(self.user), permissions=['read'])
+        component2.add_contributor(userA, auth=Auth(self.user), permissions=permissions.READ)
 
         component3 = ProjectFactory(creator=self.user, title='Three')
-        component3.add_contributor(userA, auth=Auth(self.user), permissions=['read'])
-        component3.add_contributor(userB, auth=Auth(self.user), permissions=['read'])
+        component3.add_contributor(userA, auth=Auth(self.user), permissions=permissions.READ)
+        component3.add_contributor(userB, auth=Auth(self.user), permissions=permissions.READ)
 
         component4 = ProjectFactory(creator=self.user, title='Four')
-        component4.add_contributor(userB, auth=Auth(self.user), permissions=['read'])
+        component4.add_contributor(userB, auth=Auth(self.user), permissions=permissions.READ)
 
         component5 = ProjectFactory(creator=self.user, title='Five')
-        component5.add_contributor(userB, auth=Auth(self.user), permissions=['read'])
+        component5.add_contributor(userB, auth=Auth(self.user), permissions=permissions.READ)
 
         component6 = ProjectFactory(creator=self.user, title='Six')
-        component6.add_contributor(userA, auth=Auth(self.user), permissions=['read'])
+        component6.add_contributor(userA, auth=Auth(self.user), permissions=permissions.READ)
 
         component7 = ProjectFactory(creator=self.user, title='Seven')
-        component7.add_contributor(userA, auth=Auth(self.user), permissions=['read'])
+        component7.add_contributor(userA, auth=Auth(self.user), permissions=permissions.READ)
 
         component8 = ProjectFactory(creator=self.user, title='Eight')
-        component8.add_contributor(userA, auth=Auth(self.user), permissions=['read'])
-        component8.add_contributor(userB, auth=Auth(self.user), permissions=['read'])
+        component8.add_contributor(userA, auth=Auth(self.user), permissions=permissions.READ)
+        component8.add_contributor(userB, auth=Auth(self.user), permissions=permissions.READ)
 
         component9 = ProjectFactory(creator=self.user, title='Nine')
-        component9.add_contributor(userB, auth=Auth(self.user), permissions=['read'])
+        component9.add_contributor(userB, auth=Auth(self.user), permissions=permissions.READ)
 
         project1.add_pointer(component2, Auth(self.user))
         NodeRelation.objects.create(parent=project1, child=component4)
@@ -422,7 +463,7 @@ class TestAddContributorJson(OsfTestCase):
         assert_equal(user_info['n_projects_in_common'], 0)
         assert_equal(user_info['registered'], True)
         assert_equal(user_info['active'], True)
-        assert_in('secure.gravatar.com', user_info['gravatar_url'])
+        assert_in('secure.gravatar.com', user_info['profile_image_url'])
         assert_equal(user_info['profile_url'], self.profile)
 
     def test_add_contributor_json_with_edu(self):
@@ -438,7 +479,7 @@ class TestAddContributorJson(OsfTestCase):
         assert_equal(user_info['n_projects_in_common'], 0)
         assert_equal(user_info['registered'], True)
         assert_equal(user_info['active'], True)
-        assert_in('secure.gravatar.com', user_info['gravatar_url'])
+        assert_in('secure.gravatar.com', user_info['profile_image_url'])
         assert_equal(user_info['profile_url'], self.profile)
 
     def test_add_contributor_json_with_job(self):
@@ -454,7 +495,7 @@ class TestAddContributorJson(OsfTestCase):
         assert_equal(user_info['n_projects_in_common'], 0)
         assert_equal(user_info['registered'], True)
         assert_equal(user_info['active'], True)
-        assert_in('secure.gravatar.com', user_info['gravatar_url'])
+        assert_in('secure.gravatar.com', user_info['profile_image_url'])
         assert_equal(user_info['profile_url'], self.profile)
 
     def test_add_contributor_json_with_job_and_edu(self):
@@ -471,5 +512,5 @@ class TestAddContributorJson(OsfTestCase):
         assert_equal(user_info['n_projects_in_common'], 0)
         assert_equal(user_info['registered'], True)
         assert_equal(user_info['active'], True)
-        assert_in('secure.gravatar.com', user_info['gravatar_url'])
+        assert_in('secure.gravatar.com', user_info['profile_image_url'])
         assert_equal(user_info['profile_url'], self.profile)

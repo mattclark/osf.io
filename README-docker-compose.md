@@ -43,6 +43,10 @@
     - Configure docker to start at boot for Ubuntu 15.04 onwards
       `sudo systemctl enable docker`
 
+    - In order to run OSF Preprints, raise fs.inotify.max_user_watches from default value
+      `echo fs.inotify.max_user_watches=131072 | sudo tee -a /etc/sysctl.conf`
+      `sudo sysctl -p`
+
   - Windows
     - Install Microsoft Loopback Adapter (Windows 10 follow community comments as the driver was renamed)
       https://technet.microsoft.com/en-us/library/cc708322(v=ws.10).aspx
@@ -64,7 +68,7 @@
 
 ## Application Configuration
 
-* _NOTE: After making changes to `Environment Variables` or `Volume Mounts` (e.g. docker-sync) you will need to recreate the container(s)._
+* _NOTE: After making changes to `Environment Variables` or `Volume Mounts` you will need to recreate the container(s)._
 
   - `$ docker-compose up --force-recreate --no-deps preprints`
 
@@ -74,6 +78,8 @@
     `$ cp ./website/settings/local-dist.py ./website/settings/local.py`
 
     `$ cp ./api/base/settings/local-dist.py ./api/base/settings/local.py`
+
+    `$ cp ./docker-compose-dist.override.yml ./docker-compose.override.yml`
 
 2. OPTIONAL (uncomment the below lines if you will use remote debugging) Environment variables (incl. remote debugging)
   - e.g. .docker-compose.env
@@ -85,30 +91,6 @@
     ```
 
       _NOTE: Similar docker-compose.\<name\>.env environment configuration files exist for services._
-
-## Docker Sync
-
-Ubuntu: Skip install of docker-sync, fswatch, and unison. instead...
-        `cp docker-compose.linux.yml docker-compose.override.yml`
-        Ignore future steps that start, stop, or wait for docker-sync
-
-1. Install Docker Sync 0.3.5
-  - Mac: `$ gem install docker-sync -v 0.3.5`
-  - [Instructions](http://docker-sync.io)
-
-1. Install fswatch and unison
-  - Mac: `$ brew install fswatch unison`
-
-1. Running Docker Sync
-
-    _NOTE: Wait for Docker Sync to fully start before running any docker-compose commands._
-
-    **IMPORTANT**: docker-sync may ask you to upgrade to a newer version. Type `n` to decline the upgrade then rerun the `start` command.
-
-  - `$ docker-sync start --daemon`
-
-1. OPTIONAL: If you have problems trying installing macfsevents
-  - `$ sudo pip install macfsevents`
 
 ## Application Runtime
 
@@ -123,7 +105,7 @@ Ubuntu: Skip install of docker-sync, fswatch, and unison. instead...
     _NOTE: When the various requirements installations are complete these containers will exit. You should only need to run these containers after pulling code that changes python requirements or if you update the python requirements._
 
 2. Start Core Component Services (Detached)
-  - `$ docker-compose up -d elasticsearch postgres tokumx rabbitmq`
+  - `$ docker-compose up -d elasticsearch postgres mongo rabbitmq`
 
 3. Remove your existing node_modules and start the assets watcher (Detached)
   - `$ rm -Rf ./node_modules`
@@ -138,7 +120,7 @@ Ubuntu: Skip install of docker-sync, fswatch, and unison. instead...
 5. Run migrations and create preprint providers
   - When starting with an empty database you will need to run migrations and populate preprint providers. See the [Running arbitrary commands](#running-arbitrary-commands) section below for instructions.
 6. Start the OSF Web, API Server, Preprints, and Registries (Detached)
-  - `$ docker-compose up -d worker web api admin preprints registries`
+  - `$ docker-compose up -d worker web api admin preprints registries ember_osf_web`
 7. View the OSF at [http://localhost:5000](http://localhost:5000).
 
 
@@ -147,12 +129,10 @@ Ubuntu: Skip install of docker-sync, fswatch, and unison. instead...
 - Once the requirements have all been installed, you can start the OSF in the background with
 
   ```bash
-  $ docker-sync start
-  # Wait until you see "Nothing to do: replicas have not changed since last sync."
-  $ docker-compose up -d assets admin_assets mfr wb fakecas sharejs worker web api admin preprints registries
+  $ docker-compose up -d assets admin_assets mfr wb fakecas sharejs worker web api admin preprints registries ember_osf_web
   ```
 
-- To view the logs for a given container: 
+- To view the logs for a given container:
 
   ```bash
   $ docker-compose logs -f --tail 100 web
@@ -168,13 +148,15 @@ Ubuntu: Skip install of docker-sync, fswatch, and unison. instead...
 - Populate institutions:
   - After resetting your database or with a new install you will need to populate the table of institutions. **You must have run migrations first.**
     - `docker-compose run --rm web python -m scripts.populate_institutions test`
-- Populate preprint providers:
-  - After resetting your database or with a new install you will need to populate the table of preprint providers. **You must have run migrations first.**
-    - `docker-compose run --rm web python -m scripts.update_taxonomies`
-    - `docker-compose run --rm web python manage.py populate_fake_preprint_providers`
+- Populate preprint, registration, and collection providers:
+  - After resetting your database or with a new install, the required providers and subjects will be created automatically **when you run migrations.** To create more:
+    - `docker-compose run --rm web python manage.py populate_fake_providers`
 - Populate citation styles
   - Needed for api v2 citation style rendering.
     - `docker-compose run --rm web python -m scripts.parse_citation_styles`
+- Start ember_osf_web
+  - Needed for quickfiles feature:
+    - `docker-compose up -d ember_osf_web`
 - OPTIONAL: Register OAuth Scopes
   - Needed for things such as the ember-osf dummy app
     - `docker-compose run --rm web python -m scripts.register_oauth_scopes`
@@ -187,59 +169,11 @@ Ubuntu: Skip install of docker-sync, fswatch, and unison. instead...
 
 ## Application Debugging
 
-### Debugging Services
-
-The OSF is supported by several services which function independently from the main site and need some configuration to be modified using docker-sync. If you don't need to make changes to Waterbutler, MFR etc. you can ignore this.
-
-  Uncomment the appropriate code in docker-compose.override.yml and docker-sync.yml for your desired container and be sure to specify the relative path to your service code directories.
-  This makes it so your local changes will be reflected in the docker containers. Until you do this none of your changes will have any effect.
-  For example if you wanted to the modify Waterbutler you would uncomment the following.
-  
-  - In `docker-compose.override.yml`:
-
-    ```yml
-    services:
-      wb:
-        volumes_from:
-          - container:wb-sync
-
-    ...
-    ```
-
-  - In `docker-sync.yml`:
-
-    ```yml
-    syncs:
-      wb-sync:
-        src: '../waterbutler'
-        dest: '/code'
-        sync_strategy: 'unison'
-        sync_excludes_type: 'Name'
-        sync_excludes: ['.DS_Store', '*.pyc', '*.tmp', '.git', '.idea']
-        watch_excludes: ['.*\.DS_Store', '.*\.pyc', '.*\.tmp', '.*/\.git', '.*/\.idea']
-
-    ...
-    ```
-  
-  Modifying these files will show up as changes in git. To avoid committing these files, run:
-  
-  ```bash
-  git update-index --skip-worktree docker-compose.override.yml docker-sync.yml
-  ```
-  
-  To be able to commit changes to these files again, run:
-  
-  ```bash
-  git update-index --no-skip-worktree docker-compose.override.yml docker-sync.yml
-  ```
-
-  The first time that sync settings are changed, you will need to run docker-compose up --force-recreate <container name>. To see the effect of code changes as you work (without needing to restart the container), you will need to separately turn on debug mode for the service by setting `DEBUG=1` and `SERVER_CONFIG_DEBUG=1` in `docker-compose.wb.env` or `docker-compose.mfr.env` this will enable live reload for those services, so your changes will take effect automatically in a few seconds.
-
 ### Catching Print Statements
 
 If you want to debug your changes by using print statements, you'll have to have to set your container's environment variable PYTHONUNBUFFERED to 0. You can do this two ways:
-  
-  1. Edit your container configuration in docker-compose.mfr.env or docker-compose.mfr.env to include the new environment variable by uncommenting PYTHONUNBUFFERED=0 
+
+  1. Edit your container configuration in docker-compose.mfr.env or docker-compose.mfr.env to include the new environment variable by uncommenting PYTHONUNBUFFERED=0
   2. If you're using a container running Python 3 you can insert the following code prior to a print statement:
    ```
     import functools
@@ -262,7 +196,7 @@ You should run the `web` and/or `api` container (depending on which codebase the
 $ docker-compose kill web
 
 # Run a web container. App logs and breakpoints will show up here.
-$ docker-compose run --service-ports web
+$ docker-compose run --rm --service-ports web
 ```
 
 **IMPORTANT: While attached to the running app, CTRL-c will stop the container.** To detach from the container and leave it running, **use CTRL-p CTRL-q**. Use `docker attach` to re-attach to the container, passing the *container-name* (which you can get from `docker-compose ps`), e.g. `docker attach osf_web_run_1`.
@@ -295,6 +229,9 @@ $ docker-compose run --service-ports web
 - Test a Specific Method
   - `$ docker-compose run --rm web invoke test_module -m tests/test_conferences.py::TestProvisionNode::test_upload`
 
+- Test with Specific Parameters (1 cpu, capture stdout)
+  - `$ docker-compose run --rm web invoke test_module -m tests/test_conferences.py::TestProvisionNode::test_upload -n 1 --params '--capture=sys'`
+
 ## Managing Container State
 
 Restart a container:
@@ -311,33 +248,33 @@ List containers and status:
   - `$ docker-compose ps`
 
 ### Backing up your database
-In certain cases, you may wish to remove all docker container images, but preserve a copy of the database used by your 
-local OSF instance. For example, this is helpful if you have test data that you would like to use after 
+In certain cases, you may wish to remove all docker container images, but preserve a copy of the database used by your
+local OSF instance. For example, this is helpful if you have test data that you would like to use after
 resetting docker. To back up your database, follow the following sequence of commands:
 
-1. Install Postgres on your local machine, outside of docker. (eg `brew install postgres`) To avoid migrations, the 
-  version you install must match the one used by the docker container. 
+1. Install Postgres on your local machine, outside of docker. (eg `brew install postgres`) To avoid migrations, the
+  version you install must match the one used by the docker container.
   ([as of this writing](https://github.com/CenterForOpenScience/osf.io/blob/ce1702cbc95eb7777e5aaf650658a9966f0e6b0c/docker-compose.yml#L53), Postgres 9.6)
-2. Start postgres locally. This must be on a different port than the one used by [docker postgres](https://github.com/CenterForOpenScience/osf.io/blob/ce1702cbc95eb7777e5aaf650658a9966f0e6b0c/docker-compose.yml#L61). 
+2. Start postgres locally. This must be on a different port than the one used by [docker postgres](https://github.com/CenterForOpenScience/osf.io/blob/ce1702cbc95eb7777e5aaf650658a9966f0e6b0c/docker-compose.yml#L61).
   Eg, `pg_ctl -D /usr/local/var/postgres start -o "-p 5433"`
 3. Verify that the postgres docker container is running (`docker-compose up -d postgres`)
-4. Tell your local (non-docker) version of postgres to connect to (and back up) data from the instance in docker 
-  (defaults to port 5432): 
+4. Tell your local (non-docker) version of postgres to connect to (and back up) data from the instance in docker
+  (defaults to port 5432):
   `pg_dump --username postgres --compress 9 --create --clean --format d --jobs 4 --host localhost --file ~/Desktop/osf_backup osf`
-  
+
 (shorthand: `pg_dump -U postgres -Z 9 -C --c -Fd --j 4 -h localhost --f ~/Desktop/osf_backup osf`)
 
 
 #### Restoring your database
-To restore a local copy of your database for use inside docker, make sure to start both local and dockerized postgres 
-(as shown above). For best results, start from a clean postgres container with no other data. (see below for 
-instructions on dropping postgres data volumes) 
+To restore a local copy of your database for use inside docker, make sure to start both local and dockerized postgres
+(as shown above). For best results, start from a clean postgres container with no other data. (see below for
+instructions on dropping postgres data volumes)
 
 When ready, run the restore command from a local terminal:
 ```bash
 $ pg_restore --username postgres --clean --dbname osf --format d --jobs 4 --host localhost ~/Desktop/osf_backup
 ```
- 
+
 (shorthand) `pg_restore -U postgres -c -d osf -Fd -j 4 -h localhost ~/Desktop/osf_backup`
 
 ## Cleanup & Docker Reset
@@ -368,4 +305,38 @@ $ docker-compose pull
 $ docker-compose up requirements mfr_requirements wb_requirements
 # Run db migrations
 $ docker-compose run --rm web python manage.py migrate
+```
+
+## Miscellaneous
+
+### Runtime Privilege
+
+When running privileged commands such as `strace` inside a docker container, you may encounter the following error.
+
+```bash
+strace: test_ptrace_setoptions_followfork: PTRACE_TRACEME doesn't work: Operation not permitted
+```
+
+The issue is that docker containers run in unprivileged mode by default.
+
+For `docker run`, you can use `--privilege=true` to give the container extended privileges. You can also add or drop capabilities by using `cap-add` and `cap-drop`. Since Docker 1.12, there is no need to add `--security-opt seccomp=unconfined` because the seccomp profile will adjust to selected capabilities. ([Reference](https://docs.docker.com/engine/reference/run/#runtime-privilege-and-linux-capabilities))
+
+When using `docker-compose`, set `privileged: true` for individual containers in the `docker-compose.yml`. ([Reference](https://docs.docker.com/compose/compose-file/#domainname-hostname-ipc-mac_address-privileged-read_only-shm_size-stdin_open-tty-user-working_dir)) Here is an example for WaterButler:
+
+```yml
+wb:
+  image: quay.io/centerforopenscience/waterbutler:develop
+  command: invoke server
+  privileged: true
+  restart: unless-stopped
+  ports:
+    - 7777:7777
+  env_file:
+    - .docker-compose.wb.env
+  volumes:
+    - wb_requirements_vol:/usr/local/lib/python3.5
+    - wb_requirements_local_bin_vol:/usr/local/bin
+    - osfstoragecache_vol:/code/website/osfstoragecache
+    - wb_tmp_vol:/tmp
+  stdin_open: true
 ```

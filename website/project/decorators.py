@@ -8,12 +8,14 @@ from flask import request
 from framework import status
 from framework.auth import Auth, cas
 from framework.flask import redirect  # VOL-aware redirect
-from framework.exceptions import HTTPError
+from framework.exceptions import HTTPError, TemplateHTTPError
 from framework.auth.decorators import collect_auth
 from framework.database import get_or_http_error
 
-from osf.models import AbstractNode
-from website import settings
+from osf.models import AbstractNode, Guid, Preprint, OSFGroup
+from osf.utils.permissions import WRITE
+from website import settings, language
+from website.util import web_url_for
 
 _load_node_or_fail = lambda pk: get_or_http_error(AbstractNode, pk)
 
@@ -36,7 +38,9 @@ def _kwargs_to_nodes(kwargs):
         node = _load_node_or_fail(nid)
         parent = _load_node_or_fail(pid)
     elif pid and not nid:
-        node = _load_node_or_fail(pid)
+        node = Preprint.load(pid)
+        if not node:
+            node = _load_node_or_fail(pid)
     elif nid and not pid:
         node = _load_node_or_fail(nid)
     elif not pid and not nid:
@@ -72,7 +76,7 @@ def must_not_be_rejected(func):
 
     return wrapped
 
-def must_be_valid_project(func=None, retractions_valid=False, quickfiles_valid=False):
+def must_be_valid_project(func=None, retractions_valid=False, quickfiles_valid=False, preprints_valid=False, groups_valid=False):
     """ Ensures permissions to retractions are never implicitly granted. """
 
     # TODO: Check private link
@@ -80,6 +84,14 @@ def must_be_valid_project(func=None, retractions_valid=False, quickfiles_valid=F
 
         @functools.wraps(func)
         def wrapped(*args, **kwargs):
+            if preprints_valid and Preprint.load(kwargs.get('pid')):
+                _inject_nodes(kwargs)
+
+                return func(*args, **kwargs)
+
+            if groups_valid and OSFGroup.load(kwargs.get('pid')):
+                kwargs['node'] = OSFGroup.load(kwargs.get('pid'))
+                return func(*args, **kwargs)
 
             _inject_nodes(kwargs)
 
@@ -124,20 +136,38 @@ def must_be_public_registration(func):
     return wrapped
 
 
-def must_not_be_registration(func):
+def must_not_be_retracted_registration(func):
 
     @functools.wraps(func)
     def wrapped(*args, **kwargs):
 
         _inject_nodes(kwargs)
+
         node = kwargs['node']
 
-        if node.is_registration and not node.archiving:
+        if node.is_retracted:
+            return redirect(
+                web_url_for('resolve_guid', guid=node._id)
+            )
+        return func(*args, **kwargs)
+
+    return wrapped
+
+
+def must_not_be_registration(func):
+
+    @functools.wraps(func)
+    def wrapped(*args, **kwargs):
+        if kwargs.get('nid') or kwargs.get('pid'):
+            _inject_nodes(kwargs)
+        target = kwargs.get('node') or getattr(Guid.load(kwargs.get('guid')), 'referent', None)
+
+        if getattr(target, 'is_registration', False) and not getattr(target, 'archiving', False):
             raise HTTPError(
                 http.BAD_REQUEST,
                 data={
-                    'message_short': 'Registered Nodes are immutable',
-                    'message_long': "The operation you're trying to do cannot be applied to registered Nodes, which are immutable",
+                    'message_short': 'Registrations cannot be changed',
+                    'message_long': "The operation you're trying to do cannot be applied to registered projects, which are not allowed to be changed",
                 }
             )
         return func(*args, **kwargs)
@@ -164,7 +194,16 @@ def must_be_registration(func):
     return wrapped
 
 
-def check_can_access(node, user, key=None, api_node=None):
+def check_can_download_preprint_file(user, node):
+    """View helper that returns whether a given user can download unpublished preprint files.
+     :rtype: boolean
+    """
+    if not isinstance(node, Preprint):
+        return False
+    return user.has_perm('view_submissions', node.provider)
+
+
+def check_can_access(node, user, key=None, api_node=None, include_groups=True):
     """View helper that returns whether a given user can access a node.
     If ``user`` is None, returns False.
 
@@ -173,12 +212,39 @@ def check_can_access(node, user, key=None, api_node=None):
     """
     if user is None:
         return False
-    if not node.can_view(Auth(user=user)) and api_node != node:
-        if key in node.private_link_keys_deleted:
+    if request.args.get('action', '') == 'download':
+        if check_can_download_preprint_file(user, node):
+            return True
+
+    if (not node.can_view(Auth(user=user)) and api_node != node) or (not include_groups and not node.is_contributor(user)):
+        if node.is_deleted:
+            raise HTTPError(http.GONE, data={'message_long': 'The node for this file has been deleted.'})
+
+        if getattr(node, 'private_link_keys_deleted', False) and key in node.private_link_keys_deleted:
             status.push_status_message('The view-only links you used are expired.', trust=False)
-        raise HTTPError(http.FORBIDDEN, data={'message_long': ('User has restricted access to this page. '
-            'If this should not have occurred and the issue persists, please report it to '
-            '<a href="mailto:support@osf.io">support@osf.io</a>.')})
+
+        if getattr(node, 'access_requests_enabled', False):
+            access_request = node.requests.filter(creator=user).exclude(machine_state='accepted')
+            data = {
+                'node': {
+                    'id': node._id,
+                    'url': node.url
+                },
+                'user': {
+                    'access_request_state': access_request.get().machine_state if access_request else None
+                }
+            }
+            raise TemplateHTTPError(
+                http.FORBIDDEN,
+                template='request_access.mako',
+                data=data
+            )
+
+        raise HTTPError(
+            http.FORBIDDEN,
+            data={'message_long': ('User has restricted access to this page. If this should not '
+                                   'have occurred and the issue persists, ' + language.SUPPORT_LINK)}
+        )
     return True
 
 
@@ -190,13 +256,13 @@ def check_key_expired(key, node, url):
         :param str url: the url redirect to
         :return: url with pushed message added if key expired else just url
     """
-    if key in node.private_link_keys_deleted:
+    if getattr(node, 'private_link_keys_deleted', False) and key in node.private_link_keys_deleted:
         url = furl(url).add({'status': 'expired'}).url
 
     return url
 
 
-def _must_be_contributor_factory(include_public, include_view_only_anon=True):
+def _must_be_contributor_factory(include_public, include_view_only_anon=True, include_groups=True):
     """Decorator factory for authorization wrappers. Decorators verify whether
     the current user is a contributor on the current project, or optionally
     whether the current project is public.
@@ -210,34 +276,18 @@ def _must_be_contributor_factory(include_public, include_view_only_anon=True):
         @functools.wraps(func)
         def wrapped(*args, **kwargs):
             response = None
-            _inject_nodes(kwargs)
-            node = kwargs['node']
+            target = None
+            guid = Guid.load(kwargs.get('guid'))
+            if guid:
+                target = getattr(guid, 'referent', None)
+            else:
+                _inject_nodes(kwargs)
+
+            target = target or kwargs.get('node')
 
             kwargs['auth'] = Auth.from_kwargs(request.args.to_dict(), kwargs)
-            user = kwargs['auth'].user
 
-            key = request.args.get('view_only', '').strip('/')
-            #if not login user check if the key is valid or the other privilege
-
-            kwargs['auth'].private_key = key
-            if not include_view_only_anon:
-                from osf.models import PrivateLink
-                try:
-                    link_anon = PrivateLink.objects.filter(key=key).values_list('anonymous', flat=True).get()
-                except PrivateLink.DoesNotExist:
-                    link_anon = None
-
-            if not node.is_public or not include_public:
-                if not include_view_only_anon and link_anon:
-                    if not check_can_access(node=node, user=user):
-                        raise HTTPError(http.UNAUTHORIZED)
-                elif key not in node.private_link_keys_active:
-                    if not check_can_access(node=node, user=user, key=key):
-                        redirect_url = check_key_expired(key=key, node=node, url=request.url)
-                        if request.headers.get('Content-Type') == 'application/json':
-                            raise HTTPError(http.UNAUTHORIZED)
-                        else:
-                            response = redirect(cas.get_login_url(redirect_url))
+            response = check_contributor_auth(target, kwargs['auth'], include_public, include_view_only_anon, include_groups)
 
             return response or func(*args, **kwargs)
 
@@ -249,6 +299,7 @@ def _must_be_contributor_factory(include_public, include_view_only_anon=True):
 must_be_contributor = _must_be_contributor_factory(False)
 must_be_contributor_or_public = _must_be_contributor_factory(True)
 must_be_contributor_or_public_but_not_anonymized = _must_be_contributor_factory(include_public=True, include_view_only_anon=False)
+must_be_contributor_and_not_group_member = _must_be_contributor_factory(include_public=True, include_view_only_anon=False, include_groups=False)
 
 
 def must_have_addon(addon_name, model):
@@ -346,8 +397,9 @@ def must_have_permission(permission):
         @functools.wraps(func)
         def wrapped(*args, **kwargs):
             # Ensure `project` and `node` kwargs
-            _inject_nodes(kwargs)
-            node = kwargs['node']
+            if kwargs.get('nid') or kwargs.get('pid'):
+                _inject_nodes(kwargs)
+            target = kwargs.get('node') or getattr(Guid.load(kwargs.get('guid')), 'referent', None)
 
             kwargs['auth'] = Auth.from_kwargs(request.args.to_dict(), kwargs)
             user = kwargs['auth'].user
@@ -357,7 +409,7 @@ def must_have_permission(permission):
                 raise HTTPError(http.UNAUTHORIZED)
 
             # User must have permissions
-            if not node.has_permission(user, permission):
+            if not target.has_permission(user, permission):
                 raise HTTPError(http.FORBIDDEN)
 
             # Call view function
@@ -381,7 +433,7 @@ def must_have_write_permission_or_public_wiki(func):
         if wiki and wiki.is_publicly_editable:
             return func(*args, **kwargs)
         else:
-            return must_have_permission('write')(func)(*args, **kwargs)
+            return must_have_permission(WRITE)(func)(*args, **kwargs)
 
     # Return decorated function
     return wrapped
@@ -400,3 +452,31 @@ def http_error_if_disk_saving_mode(func):
             )
         return func(*args, **kwargs)
     return wrapper
+
+def check_contributor_auth(node, auth, include_public, include_view_only_anon, include_groups=True):
+    response = None
+
+    user = auth.user
+
+    auth.private_key = request.args.get('view_only', '').strip('/')
+
+    if not include_view_only_anon:
+        from osf.models import PrivateLink
+        try:
+            link_anon = PrivateLink.objects.filter(key=auth.private_key).values_list('anonymous', flat=True).get()
+        except PrivateLink.DoesNotExist:
+            link_anon = None
+
+    if not node.is_public or not include_public:
+        if not include_view_only_anon and link_anon:
+            if not check_can_access(node=node, user=user, include_groups=include_groups):
+                raise HTTPError(http.UNAUTHORIZED)
+        elif not getattr(node, 'private_link_keys_active', False) or auth.private_key not in node.private_link_keys_active:
+            if not check_can_access(node=node, user=user, key=auth.private_key, include_groups=include_groups):
+                redirect_url = check_key_expired(key=auth.private_key, node=node, url=request.url)
+                if request.headers.get('Content-Type') == 'application/json':
+                    raise HTTPError(http.UNAUTHORIZED)
+                else:
+                    response = redirect(cas.get_login_url(redirect_url))
+
+    return response

@@ -1,3 +1,4 @@
+# TODO: Consider rewriting as management command
 import logging
 import sys
 import time
@@ -12,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 
 def get_targets():
-    PreprintService = apps.get_model('osf.PreprintService')
-    return PreprintService.objects.filter().values_list('guids___id', flat=True)
+    Preprint = apps.get_model('osf.Preprint')
+    return Preprint.objects.filter().values_list('guids___id', flat=True)
 
 def migrate(dry=True):
     assert settings.SHARE_URL, 'SHARE_URL must be set to migrate.'
@@ -52,5 +53,5 @@ def main():
     setup_django()
     migrate(dry=dry_run)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

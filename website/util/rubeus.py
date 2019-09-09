@@ -4,18 +4,19 @@ formatted hgrid list/folders.
 """
 import logging
 
-import hurry.filesize
 from django.utils import timezone
 
 from framework import sentry
 from framework.auth.decorators import Auth
 
 from django.apps import apps
+from django.db.models import Exists, OuterRef, Case, When, Value, IntegerField
 
 from website import settings
 from website.util import paths
-from website.util import sanitize
 from website.settings import DISK_SAVING_MODE
+from osf.utils import sanitize
+from osf.utils.permissions import WRITE_NODE
 
 
 logger = logging.getLogger(__name__)
@@ -30,10 +31,6 @@ DEFAULT_PERMISSIONS = {
     'view': True,
     'edit': False,
 }
-
-def format_filesize(size):
-    return hurry.filesize.size(size, system=hurry.filesize.alternative)
-
 
 def default_urls(node_api, short_name):
     return {
@@ -64,7 +61,7 @@ def build_addon_root(node_settings, name, permissions=None,
     :param dict or Auth permissions: Dictionary of permissions for the addon's content or Auth for use in node.can_X methods
     :param dict urls: Hgrid related urls
     :param String extra: Html to be appened to the addon folder name
-        eg. Branch switcher for github/bitbucket
+        eg. Branch switcher for github/bitbucket/gitlab
     :param list of dicts buttons: List of buttons to appear in HGrid row. Each
         dict must have 'text', a string that will appear on the button, and
         'action', the name of a function in
@@ -73,7 +70,7 @@ def build_addon_root(node_settings, name, permissions=None,
     :return dict: Hgrid formatted dictionary for the addon root folder
 
     """
-    from website.util import check_private_key_for_anonymized_link
+    from osf.utils.permissions import check_private_key_for_anonymized_link
 
     permissions = permissions or DEFAULT_PERMISSIONS
     if name and not check_private_key_for_anonymized_link(private_key):
@@ -120,6 +117,11 @@ def build_addon_root(node_settings, name, permissions=None,
         'nodeApiUrl': node_settings.owner.api_url,
     }
     ret.update(kwargs)
+
+    if hasattr(node_settings, 'region'):
+        ret.update({'nodeRegion': node_settings.region.name})
+        ret.update({'waterbutlerURL': node_settings.region.waterbutler_url})
+
     return ret
 
 
@@ -160,69 +162,68 @@ class NodeFileCollector(object):
         self.can_edit = self.node.can_edit(auth) and not self.node.is_registration
 
     def to_hgrid(self):
-        """Return the Rubeus.JS representation of the node's file data, including
-        addons and components
         """
-        root = self._serialize_node(self.node)
+        Returns a representation of the node's file data, including
+        addons and components. For efficiency, only the children and
+        grandchildren of the node are serialized.
+        """
+        root = self._get_nodes(self.node, grid_root=self.node)
         return [root]
 
-    def _collect_components(self, node, visited):
-        rv = []
-        if not node.can_view(self.auth):
-            return rv
-        for child in node.get_nodes(is_deleted=False):
-            if not child.can_view(self.auth):
-                if child.primary:
-                    for desc in child.find_readable_descendants(self.auth):
-                        visited.append(desc.resolve()._id)
-                        rv.append(self._serialize_node(desc, visited=visited, parent=node))
-            elif child.resolve()._id not in visited:
-                visited.append(child.resolve()._id)
-                rv.append(self._serialize_node(child, visited=visited, parent=node))
-        return rv
-
-    def _get_node_name(self, node):
-        """Input node object, return the project name to be display.
+    def find_readable_descendants(self, node, visited):
         """
-        NodeRelation = apps.get_model('osf.NodeRelation')
-        is_node_relation = isinstance(node, NodeRelation)
-        node = node.child if is_node_relation else node
-        can_view = node.can_view(auth=self.auth)
-
-        if can_view:
-            node_name = sanitize.unescape_entities(node.title)
-        elif node.is_registration:
-            node_name = u'Private Registration'
-        elif node.is_fork:
-            node_name = u'Private Fork'
-        elif is_node_relation:
-            node_name = u'Private Link'
-        else:
-            node_name = u'Private Component'
-
-        return node_name
-
-    def _serialize_node(self, node, visited=None, parent=None):
-        """Returns the rubeus representation of a node folder.
+        Returns a generator of first descendant node(s) readable by <user>
+        in each descendant branch.
         """
-        visited = visited or []
-        visited.append(node.resolve()._id)
-        can_view = node.can_view(auth=self.auth)
-        if can_view:
-            children = self._collect_addons(node) + self._collect_components(node, visited)
+        Node = apps.get_model('osf.node')
+
+        new_branches = []
+
+        linked_node_sqs = node.node_relations.filter(is_node_link=True, child=OuterRef('pk'))
+        if self.auth and self.auth.user:
+            can_write = Node.objects.get_nodes_for_user(self.auth.user, WRITE_NODE, node._nodes.all())
         else:
+            can_write = node._nodes.none()
+        descendants_qs = (
+            node._nodes
+            .filter(is_deleted=False)
+            .annotate(is_linked_node=Exists(linked_node_sqs))
+            .annotate(has_write_perm=Case(When(id__in=can_write, then=Value(1)), default=Value(0), output_field=IntegerField()))
+            .order_by('_parents')
+        )
+
+        for descendant in descendants_qs:
+            if descendant.can_view(self.auth):
+                yield descendant
+            elif descendant._id not in visited:
+                new_branches.append(descendant)
+                visited.append(descendant._id)
+
+        for bnode in new_branches:
+            for descendant in self.find_readable_descendants(bnode, visited=visited):
+                yield descendant
+
+    def _serialize_node(self, node, parent=None, grid_root=None, children=None):
+        children = children or []
+        is_pointer = parent and node.is_linked_node
+        can_edit = node.has_write_perm if hasattr(node, 'has_write_perm') else node.can_edit(auth=self.auth)
+
+        # Determines if `node` is within two levels of `grid_root`
+        # Used to prevent complete serialization of deeply nested projects
+        if parent and grid_root and parent == grid_root:
+            children = self._get_nodes(node)['children']
+
+        if not children:
             children = []
-
-        is_pointer = parent and parent.has_node_link_to(node)
 
         return {
             # TODO: Remove safe_unescape_html when mako html safe comes in
-            'name': self._get_node_name(node),
+            'name': sanitize.unescape_entities(node.title),
             'category': node.category,
             'kind': FOLDER,
             'permissions': {
-                'edit': node.can_edit(self.auth) and not node.is_registration,
-                'view': can_view,
+                'edit': can_edit and not node.is_registration,
+                'view': True,
             },
             'urls': {
                 'upload': None,
@@ -231,9 +232,20 @@ class NodeFileCollector(object):
             'children': children,
             'isPointer': is_pointer,
             'isSmartFolder': False,
-            'nodeType': node.project_or_component,
-            'nodeID': node.resolve()._id,
+            'nodeType': 'component' if parent else 'project',
+            'nodeID': node._id,
         }
+
+    def _get_nodes(self, node, grid_root=None):
+        data = []
+        if node.can_view(auth=self.auth):
+            serialized_addons = self._collect_addons(node)
+            serialized_children = [
+                self._serialize_node(child, parent=node, grid_root=grid_root)
+                for child in self.find_readable_descendants(node, visited=[])
+            ]
+            data = serialized_addons + serialized_children
+        return self._serialize_node(node, children=data)
 
     def _collect_addons(self, node):
         rv = []

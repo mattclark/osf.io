@@ -2,7 +2,9 @@ import json
 
 import jwe
 import jwt
+import waffle
 
+from django.utils import timezone
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
@@ -11,11 +13,19 @@ from api.base import settings
 from framework import sentry
 from framework.auth import get_or_create_user
 
+from osf import features
 from osf.models import Institution
 from website.mails import send_mail, WELCOME_OSF4I
+from website.settings import OSF_SUPPORT_EMAIL, DOMAIN
 
 
 class InstitutionAuthentication(BaseAuthentication):
+    """A dedicated authentication class for view ``InstitutionAuth``.
+
+    This ``InstitutionAuth`` view and this auth class is only used and should only be used by CAS.
+    Changing it may break the institution login feature.  Please check with @longze and @matt before
+    making any changes.
+    """
 
     media_type = 'text/plain'
 
@@ -49,7 +59,7 @@ class InstitutionAuthentication(BaseAuthentication):
                 jwe.decrypt(request.body, settings.JWE_SECRET),
                 settings.JWT_SECRET,
                 options={'verify_exp': False},
-                algorithm='HS256'
+                algorithm='HS256',
             )
         except (jwt.InvalidTokenError, TypeError):
             raise AuthenticationFailed
@@ -93,6 +103,9 @@ class InstitutionAuthentication(BaseAuthentication):
                 user.suffix = suffix
             user.update_date_last_login()
 
+            # Relying on front-end validation until `accepted_tos` is added to the JWT payload
+            user.accepted_terms_of_service = timezone.now()
+
             # save and register user
             user.save()
             user.register(username)
@@ -102,7 +115,10 @@ class InstitutionAuthentication(BaseAuthentication):
                 to_addr=user.username,
                 mail=WELCOME_OSF4I,
                 mimetype='html',
-                user=user
+                user=user,
+                domain=DOMAIN,
+                osf_support_email=OSF_SUPPORT_EMAIL,
+                storage_flag_is_active=waffle.flag_is_active(request, features.STORAGE_I18N),
             )
 
         if not user.is_affiliated_with_institution(institution):

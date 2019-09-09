@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from __future__ import unicode_literals
 import itertools
 import httplib as http
 import logging
@@ -8,7 +9,6 @@ import requests
 import urllib
 
 from django.apps import apps
-from django.db.models import Count
 from flask import request, send_from_directory, Response, stream_with_context
 
 from framework import sentry
@@ -19,16 +19,26 @@ from framework.exceptions import HTTPError
 from framework.flask import redirect  # VOL-aware redirect
 from framework.forms import utils as form_utils
 from framework.routing import proxy_url
-from framework.auth.core import get_current_user_id
+from website import settings
 from website.institutions.views import serialize_institution
 
-from osf.models import BaseFileNode, Guid, Institution, PreprintService, AbstractNode
-from website.settings import EXTERNAL_EMBER_APPS, PROXY_EMBER_APPS, INSTITUTION_DISPLAY_NODE_THRESHOLD
+from osf import features
+from osf.models import BaseFileNode, Guid, Institution, Preprint, AbstractNode, Node, Registration
+from addons.osfstorage.models import Region
+
+from website.settings import EXTERNAL_EMBER_APPS, PROXY_EMBER_APPS, EXTERNAL_EMBER_SERVER_TIMEOUT, DOMAIN
+from website.ember_osf_web.decorators import ember_flag_is_active
+from website.ember_osf_web.views import use_ember_app
 from website.project.model import has_anonymous_link
-from website.util import permissions
+from osf.utils import permissions
+
+from api.waffle.utils import flag_is_active, storage_i18n_flag_active
 
 logger = logging.getLogger(__name__)
 preprints_dir = os.path.abspath(os.path.join(os.getcwd(), EXTERNAL_EMBER_APPS['preprints']['path']))
+registries_dir = os.path.abspath(os.path.join(os.getcwd(), EXTERNAL_EMBER_APPS['registries']['path']))
+ember_osf_web_dir = os.path.abspath(os.path.join(os.getcwd(), EXTERNAL_EMBER_APPS['ember_osf_web']['path']))
+
 
 def serialize_contributors_for_summary(node, max_count=3):
     # # TODO: Use .filter(visible=True) when chaining is fixed in django-include
@@ -58,6 +68,22 @@ def serialize_contributors_for_summary(node, max_count=3):
         'contributors': contributors,
         'others_count': others_count,
     }
+
+def serialize_groups_for_summary(node):
+    groups = node.osf_groups
+    n_groups = len(groups)
+    group_string = ''
+    for index, group in enumerate(groups):
+        if index == n_groups - 1:
+            separator = ''
+        elif index == n_groups - 2:
+            separator = ' & '
+        else:
+            separator = ', '
+
+        group_string = group_string + group.name + separator
+
+    return group_string
 
 
 def serialize_node_summary(node, auth, primary=True, show_path=False):
@@ -91,10 +117,11 @@ def serialize_node_summary(node, auth, primary=True, show_path=False):
             'api_url': node.api_url,
             'title': node.title,
             'category': node.category,
-            'isPreprint': bool(node.preprint_file_id),
-            'childExists': node.nodes_active.exists(),
+            'is_supplemental_project': node.has_linked_published_preprints,
+            'childExists': Node.objects.get_children(node, active=True).exists(),
             'is_admin': node.has_permission(user, permissions.ADMIN),
             'is_contributor': node.is_contributor(user),
+            'is_contributor_or_group_member': node.is_contributor_or_group_member(user),
             'logged_in': auth.logged_in,
             'node_type': node.project_or_component,
             'is_fork': node.is_fork,
@@ -113,76 +140,51 @@ def serialize_node_summary(node, auth, primary=True, show_path=False):
             'parent_title': parent_node.title if parent_node else None,
             'parent_is_public': parent_node.is_public if parent_node else False,
             'show_path': show_path,
-            # Read nlogs annotation if possible
-            'nlogs': node.nlogs if hasattr(node, 'nlogs') else node.logs.count(),
             'contributors': contributor_data['contributors'],
             'others_count': contributor_data['others_count'],
+            'groups': serialize_groups_for_summary(node),
+            'description': node.description if len(node.description) <= 150 else node.description[0:150] + '...',
         })
     else:
         summary['can_view'] = False
 
     return summary
 
-
 def index():
-    try:  # Check if we're on an institution landing page
-        #TODO : make this way more robust
-        institution = Institution.objects.get(domains__contains=[request.host.lower()], is_deleted=False)
+    # Check if we're on an institution landing page
+    institution = Institution.objects.filter(domains__icontains=request.host, is_deleted=False)
+    if institution.exists():
+        institution = institution.get()
         inst_dict = serialize_institution(institution)
         inst_dict.update({
-            'home': False,
-            'institution': True,
-            'redirect_url': '/institutions/{}/'.format(institution._id),
+            'redirect_url': '{}institutions/{}/'.format(DOMAIN, institution._id),
         })
-
         return inst_dict
-    except Institution.DoesNotExist:
-        pass
-
-    user_id = get_current_user_id()
-    if user_id:  # Logged in: return either landing page or user home page
-        all_institutions = (
-            Institution.objects.filter(
-                is_deleted=False,
-                nodes__is_public=True,
-                nodes__is_deleted=False,
-                nodes__type='osf.node'
-            )
-            .annotate(Count('nodes'))
-            .filter(nodes__count__gte=INSTITUTION_DISPLAY_NODE_THRESHOLD)
-            .order_by('name').only('_id', 'name', 'logo_name')
-        )
-        dashboard_institutions = [
-            {'id': inst._id, 'name': inst.name, 'logo_path': inst.logo_path_rounded_corners}
-            for inst in all_institutions
-        ]
-
-        return {
-            'home': True,
-            'dashboard_institutions': dashboard_institutions,
-        }
-    else:  # Logged out: return landing page
-        return {
-            'home': True,
-        }
-
+    else:
+        return use_ember_app()
 
 def find_bookmark_collection(user):
     Collection = apps.get_model('osf.Collection')
-    return Collection.objects.get(creator=user, is_deleted=False, is_bookmark_collection=True)
+    return Collection.objects.get(creator=user, deleted__isnull=True, is_bookmark_collection=True)
 
 @must_be_logged_in
 def dashboard(auth):
-    return redirect('/')
+    return use_ember_app()
 
 
 @must_be_logged_in
+@ember_flag_is_active(features.EMBER_MY_PROJECTS)
 def my_projects(auth):
     user = auth.user
+
+    region_list = get_storage_region_list(user)
+
     bookmark_collection = find_bookmark_collection(user)
     my_projects_id = bookmark_collection._id
     return {'addons_enabled': user.get_addon_names(),
             'dashboard_id': my_projects_id,
+            'storage_regions': region_list,
+            'storage_flag_is_active': storage_i18n_flag_active(),
             }
 
 
@@ -269,20 +271,23 @@ def resolve_guid(guid, suffix=None):
         # Handle file `/download` shortcut with supported types.
         if suffix and suffix.rstrip('/').lower() == 'download':
             file_referent = None
-            if isinstance(referent, PreprintService) and referent.primary_file:
-                if not referent.is_published:
-                    # TODO: Ideally, permissions wouldn't be checked here.
-                    # This is necessary to prevent a logical inconsistency with
-                    # the routing scheme - if a preprint is not published, only
-                    # admins should be able to know it exists.
-                    auth = Auth.from_kwargs(request.args.to_dict(), {})
-                    if not referent.node.has_permission(auth.user, permissions.ADMIN):
-                        raise HTTPError(http.NOT_FOUND)
+            if isinstance(referent, Preprint) and referent.primary_file:
                 file_referent = referent.primary_file
             elif isinstance(referent, BaseFileNode) and referent.is_file:
                 file_referent = referent
 
             if file_referent:
+                if isinstance(file_referent.target, Preprint) and not file_referent.target.is_published:
+                    # TODO: Ideally, permissions wouldn't be checked here.
+                    # This is necessary to prevent a logical inconsistency with
+                    # the routing scheme - if a preprint is not published, only
+                    # admins and moderators should be able to know it exists.
+                    auth = Auth.from_kwargs(request.args.to_dict(), {})
+                    # Check if user isn't a nonetype or that the user has admin/moderator/superuser permissions
+                    if auth.user is None or not (auth.user.has_perm('view_submissions', file_referent.target.provider) or
+                            file_referent.target.has_permission(auth.user, permissions.ADMIN)):
+                        raise HTTPError(http.NOT_FOUND)
+
                 # Extend `request.args` adding `action=download`.
                 request.args = request.args.copy()
                 request.args.update({'action': 'download'})
@@ -291,17 +296,37 @@ def resolve_guid(guid, suffix=None):
                 return proxy_url(url)
 
         # Handle Ember Applications
-        if isinstance(referent, PreprintService):
+        if isinstance(referent, Preprint):
             if referent.provider.domain_redirect_enabled:
                 # This route should always be intercepted by nginx for the branded domain,
                 # w/ the exception of `<guid>/download` handled above.
                 return redirect(referent.absolute_url, http.MOVED_PERMANENTLY)
 
             if PROXY_EMBER_APPS:
-                resp = requests.get(EXTERNAL_EMBER_APPS['preprints']['server'], stream=True)
+                resp = requests.get(EXTERNAL_EMBER_APPS['preprints']['server'], stream=True, timeout=EXTERNAL_EMBER_SERVER_TIMEOUT)
                 return Response(stream_with_context(resp.iter_content()), resp.status_code)
 
             return send_from_directory(preprints_dir, 'index.html')
+
+        if isinstance(referent, BaseFileNode) and referent.is_file and (getattr(referent.target, 'is_quickfiles', False)):
+            if referent.is_deleted:
+                raise HTTPError(http.GONE)
+            if PROXY_EMBER_APPS:
+                resp = requests.get(EXTERNAL_EMBER_APPS['ember_osf_web']['server'], stream=True, timeout=EXTERNAL_EMBER_SERVER_TIMEOUT)
+                return Response(stream_with_context(resp.iter_content()), resp.status_code)
+
+            return send_from_directory(ember_osf_web_dir, 'index.html')
+
+        if isinstance(referent, Registration) and (
+                not suffix or suffix.rstrip('/').lower() in ('comments', 'links', 'components')
+        ):
+            if flag_is_active(request, features.EMBER_REGISTRIES_DETAIL_PAGE):
+                # Route only the base detail view to ember
+                if PROXY_EMBER_APPS:
+                    resp = requests.get(EXTERNAL_EMBER_APPS['ember_osf_web']['server'], stream=True, timeout=EXTERNAL_EMBER_SERVER_TIMEOUT)
+                    return Response(stream_with_context(resp.iter_content()), resp.status_code)
+
+                return send_from_directory(registries_dir, 'index.html')
 
         url = _build_guid_url(urllib.unquote(referent.deep_url), suffix)
         return proxy_url(url)
@@ -327,16 +352,16 @@ def redirect_help(**kwargs):
     return redirect('/faq/')
 
 def redirect_faq(**kwargs):
-    return redirect('http://help.osf.io/m/faqs/')
+    return redirect('https://help.osf.io/hc/en-us/articles/360019737894-FAQs')
 
 # redirect osf.io/howosfworks to osf.io/getting-started/
 def redirect_howosfworks(**kwargs):
     return redirect('/getting-started/')
 
 
-# redirect osf.io/getting-started to help.osf.io/
+# redirect osf.io/getting-started to https://openscience.zendesk.com/hc/en-us
 def redirect_getting_started(**kwargs):
-    return redirect('http://help.osf.io/')
+    return redirect('https://openscience.zendesk.com/hc/en-us')
 
 
 # Redirect to home page
@@ -347,3 +372,29 @@ def redirect_to_home():
 def redirect_to_cos_news(**kwargs):
     # Redirect to COS News page
     return redirect('https://cos.io/news/')
+
+
+# Return error for legacy SHARE v1 search route
+def legacy_share_v1_search(**kwargs):
+    return HTTPError(
+        http.BAD_REQUEST,
+        data=dict(
+            message_long='Please use v2 of the SHARE search API available at {}api/v2/share/search/creativeworks/_search.'.format(settings.SHARE_URL)
+        )
+    )
+
+
+def get_storage_region_list(user, node=False):
+    if not user:  # Preserves legacy frontend test behavior
+        return []
+
+    if node:
+        default_region = node.osfstorage_region
+    else:
+        default_region = user.get_addon('osfstorage').default_region
+
+    available_regions = list(Region.objects.order_by('name').values('_id', 'name'))
+    default_region = {'name': default_region.name, '_id': default_region._id}
+    available_regions.insert(0, available_regions.pop(available_regions.index(default_region)))  # default should be at top of list for UI.
+
+    return available_regions

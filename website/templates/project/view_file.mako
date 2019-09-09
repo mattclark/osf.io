@@ -15,7 +15,7 @@
   <div class="col-sm-5">
     <h2 class="break-word">
       ## Split file name into two parts: with and without extension
-      ${file_name_title | h}<span id="file-ext">${file_name_ext | h}</span>
+      <span id="fileTitleEditable">${file_name | h}</span>
       <a id='versionLink' class='scripted'>(Version: ${ version_id | h})</a>
       % if file_revision:
         <small>&nbsp;${file_revision | h}</small>
@@ -28,20 +28,6 @@
 </div>
 <hr>
 
-%if file_id == node['preprint_file_id'] and node['is_preprint']:
-<div class="row">
-    <div class="col-xs-12">
-        <div class="preprint-notice m-b-md p-md clearfix">
-            This is the primary file for a preprint. <a href="http://help.osf.io/m/preprints">Learn more</a> about how to work with preprint files.
-            <a href="${node['preprint_url']}" class="btn btn-default btn-sm m-r-xs pull-right">View preprint</a>
-            % if user['is_admin']:
-                <a href="${node['preprint_url']}edit" class="btn btn-default btn-sm m-r-xs pull-right">Edit preprint</a>
-            % endif
-        </div>
-    </div>
-</div>
-% endif
-
 <div class="row">
 
   <div id="file-navigation" class="panel-toggle col-sm-3 file-tree">
@@ -49,8 +35,14 @@
       <div class="osf-panel-body-flex file-page reset-height">
         <div id="grid">
           <div class="spinner-loading-wrapper">
-            <div class="logo-spin logo-lg"></div>
+            % if target_deleted:
+            <p class="m-t-sm fg-load-message">No files</p>
+            %else:
+            <div class="ball-scale ball-scale-blue">
+                <div></div>
+            </div>
             <p class="m-t-sm fg-load-message"> Loading files...  </p>
+            %endif
           </div>
         </div>
       </div>
@@ -65,7 +57,7 @@
               </div>
           </div>
       </div>
-      %if (file_tags or 'write' in user['permissions']) and provider == 'osfstorage' and not error:
+      %if (file_tags or permissions.WRITE in user['permissions']) and provider == 'osfstorage' and not error:
        <div class="panel panel-default">
         <div class="panel-heading clearfix">
             <h3 class="panel-title">Tags</h3>
@@ -218,7 +210,7 @@
             userId: ${ user['id'] | sjson, n },
             userName: ${ user['fullname'] | sjson, n },
             userUrl: ${ ('/' + user['id'] + '/') if user['id'] else None | sjson, n },
-            userGravatar: ${ urls['gravatar'].replace('&amp;', '&') | sjson, n }
+            userProfileImage: ${ urls['profile_image'].replace('&amp;', '&') | sjson, n }
         },
         node: {
           urls: {

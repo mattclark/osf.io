@@ -18,7 +18,7 @@ var $osf = require('js/osfHelpers');
 var waterbutler = require('js/waterbutler');
 
 var iconmap = require('js/iconmap');
-var storageAddons = require('json!storageAddons.json');
+var storageAddons = require('json-loader!storageAddons.json');
 
 // CSS
 require('css/fangorn.css');
@@ -48,7 +48,21 @@ var STATE_MAP = {
 };
 
 var SYNC_UPLOAD_ADDONS = ['github', 'dataverse'];
+var READ_ONLY_ADDONS = ['bitbucket', 'gitlab', 'onedrive'];
+var MOVE_INTERVAL;
+var MILLSECOND_PER_MOVE_REQUEST = 500;
 
+var CONFLICT_INFO = {
+    skip: {
+        passed: 'Skipped'
+    },
+    replace: {
+        passed: 'Moved or replaced old version'
+    },
+    keep: {
+        passed: 'Kept both versions'
+    }
+};
 
 var OPERATIONS = {
     RENAME: {
@@ -91,6 +105,14 @@ function findByTempID(parent, tmpID) {
     return item;
 }
 
+// Replace is the "default" conflict, when a user resolves a conflict by explicitly replacing it simply
+// executes a normal move and adds the conflicted file to the ready queue, because of this
+var replace = function(tb, cb, item) {
+    tb.pendingReadyFiles.push(item);
+    return cb.bind(tb, 'replace');
+};
+
+var WIKI_IMAGES_FOLDER_PATH = '/Wiki images/';
 
 /**
  * Cancel a pending upload
@@ -128,6 +150,12 @@ function cancelUpload(row) {
     tb.isUploading(handled && filesArr.length > 1);
 }
 
+function removeFromUI(file, tb) {
+    var parent = file.treebeardParent || tb.dropzoneItemCache;
+    var item = findByTempID(parent, file.tmpID);
+    tb.deleteNode(parent.id, item.id);
+}
+
 /**
  * Cancel all pending uploads
  * @this Treebeard.controller
@@ -139,12 +167,6 @@ function cancelAllUploads() {
     var filesArr = tb.dropzone.files.filter(function(file) {
         return cancelableStatuses.indexOf(file.status) > -1 || !file.accepted;
     });
-    // Remove all queued files
-    var removeFromUI = function(file) {
-        var parent = file.treebeardParent || tb.dropzoneItemCache;
-        var item = findByTempID(parent, file.tmpID);
-        tb.deleteNode(parent.id, item.id);
-    };
     // Clear all synchronous uploads
     if (tb.dropzone.syncFileCache !== undefined) {
         SYNC_UPLOAD_ADDONS.forEach(function(provider) {
@@ -160,7 +182,7 @@ function cancelAllUploads() {
     filesArr.forEach(function(file, index) {
         // Ignore completed files
         if (file.upload.progress === 100) return;
-        removeFromUI(file);
+        removeFromUI(file, tb);
         // Cancel currently uploading file
         tb.dropzone.removeFile(file);
     });
@@ -375,7 +397,9 @@ function inheritFromParent(item, parent, fields) {
         item.data[field] = item.data[field] || parent.data[field];
     });
 
-    if(item.data.provider === 'github' || item.data.provider === 'bitbucket'){
+    item.data.waterbutlerURL = parent.data.waterbutlerURL;
+
+    if(item.data.provider === 'github' || item.data.provider === 'bitbucket' || item.data.provider === 'gitlab'){
         item.data.branch = parent.data.branch;
     }
 }
@@ -430,39 +454,80 @@ function _fangornToggleCheck(item) {
     return false;
 }
 
-function checkConflicts(tb, item, folder, cb) {
-    var messageArray = [];
-    for(var i = 0; i < folder.children.length; i++) {
-        var child = folder.children[i];
-        if (child.data.name === item.data.name && child.id !== item.id) {
-           messageArray.push([
-                m('p', 'An item named "' + child.data.name + '" already exists in this location.'),
-                m('h5.replace-file',
-                    '"Keep Both" will retain both files (and their version histories) in this location.'),
-                m('h5.replace-file',
-                    '"Replace" will overwrite the existing file in this location. ' +
-                    'You will lose previous versions of the overwritten file. ' +
-                    'You will keep previous versions of the moved file.'),
-                m('h5.replace-file', '"Cancel" will cancel the move.')
-            ]);
+function checkConflicts(items, folder){
 
-            tb.modal.update(
-                m('', messageArray), [
-                    m('span.btn.btn-default', {onclick: function() {tb.modal.dismiss();}}, 'Cancel'), //jshint ignore:line
-                    m('span.btn.btn-primary', {onclick: cb.bind(tb, 'keep')}, 'Keep Both'),
-                    m('span.btn.btn-primary', {onclick: cb.bind(tb, 'replace')}, 'Replace')
-                ],
-                m('h3.break-word.modal-title', 'Replace "' + child.data.name + '"?')
-            );
-            return;
+    var children = {
+      'names': [],
+      'ids': []
+    };
+    var ret = {
+        'conflicts' : [],
+        'ready': []
+    };
+
+    folder.children.forEach(function(child){
+        children.names.push(child.data.name);
+        children.ids.push(child.id);
+    });
+
+    items.forEach(function(item) {
+        if (children.names.includes(item.data.name) && !children.ids.includes(item.id)){
+            ret.conflicts.push(item);
+        } else {
+            ret.ready.push(item);
         }
+    });
+
+    return ret;
+}
+
+function handleCancel(tb, provider, mode, item){
+    if (mode === 'stop') {
+        tb.syncFileMoveCache[provider].conflicts.length = 0;
+        tb.modal.dismiss();
+    } else {
+        addFileStatus(tb, item, false, '', '', 'skip');
+        doSyncMove(tb, provider);
     }
-    cb('replace');
+}
+
+function displayConflict(tb, item, folder, cb) {
+
+    if('/' + item.data.name + '/'  === WIKI_IMAGES_FOLDER_PATH) {
+        $osf.growl('Error', 'You cannot replace the Wiki images folder');
+        return;
+    }
+
+    var mithrilContent = m('', [
+        m('p', 'An item named "' + item.data.name + '" already exists in this location.'),
+        m('h5.replace-file',
+            '"Keep Both" will retain both files (and their version histories) in this location.'),
+        m('h5.replace-file',
+            '"Replace" will overwrite the existing file in this location. ' +
+            'You will lose previous versions of the overwritten file. ' +
+            'You will keep previous versions of the moved file.'),
+        m('h5.replace-file', '"Skip" will skip the current file.'),
+        m('h5.replace-file', '"Stop" will only move files with no conflicts.')
+    ]);
+    var mithrilButtons = [
+        m('span.btn.btn-primary.btn-sm', {onclick: cb.bind(tb, 'keep')}, 'Keep Both'),
+        m('span.btn.btn-primary.btn-sm', {onclick: replace(tb, cb, item)}, 'Replace'),
+        m('span.btn.btn-default.btn-sm', {onclick: function() {handleCancel(tb, folder.data.provider, 'skip', item);}}, 'Skip'),
+        m('span.btn.btn-danger.btn-sm', {onclick: function() {handleCancel(tb, folder.data.provider, 'stop');}}, 'Stop')
+    ];
+    var header = m('h3.break-word.modal-title', 'Replace "' + item.data.name + '"?');
+    tb.modal.update(mithrilContent, mithrilButtons, header);
 }
 
 function checkConflictsRename(tb, item, name, cb) {
     var messageArray = [];
     var parent = item.parent();
+
+    if(item.data.kind === 'folder' && parent.data.name === 'OSF Storage' && '/' + name + '/'  === WIKI_IMAGES_FOLDER_PATH){
+        $osf.growl('Error', 'You cannot replace the Wiki images folder');
+        return;
+    }
+
     for(var i = 0; i < parent.children.length; i++) {
         var child = parent.children[i];
         if (child.data.name === name && child.id !== item.id) {
@@ -477,18 +542,11 @@ function checkConflictsRename(tb, item, name, cb) {
                 m('h5.replace-file', '"Cancel" will cancel the move.')
             ]);
 
-
-            if (window.contextVars.node.preprintFileId === child.data.path.replace('/', '')) {
-                messageArray = messageArray.concat([
-                    m('p', 'The file "' + child.data.name + '" is the primary file for a preprint, so it should not be replaced.'),
-                    m('strong', 'Replacing this file will remove this preprint from circulation.')
-                ]);
-            }
             tb.modal.update(
                 m('', messageArray), [
                     m('span.btn.btn-default', {onclick: function() {tb.modal.dismiss();}}, 'Cancel'), //jshint ignore:line
                     m('span.btn.btn-primary', {onclick: cb.bind(tb, 'keep')}, 'Keep Both'),
-                    m('span.btn.btn-primary', {onclick: cb.bind(tb, 'replace')}, 'Replace')
+                    m('span.btn.btn-primary', {onclick: replace(tb, cb, item)}, 'Replace')
                 ],
                 m('h3.break-word.modal-title', 'Replace "' + child.data.name + '"?')
             );
@@ -500,10 +558,45 @@ function checkConflictsRename(tb, item, name, cb) {
 
 function doItemOp(operation, to, from, rename, conflict) {
     var tb = this;
+    // dismiss old modal immediately to prevent button mashing
     tb.modal.dismiss();
+    var inReadyQueue;
+    var filesRemaining;
+    var inConflictsQueue = false;
+    var syncMoves;
+
+    var notRenameOp = typeof rename === 'undefined';
+    if (notRenameOp) {
+        filesRemaining = tb.syncFileMoveCache && tb.syncFileMoveCache[to.data.provider];
+        syncMoves = SYNC_UPLOAD_ADDONS.indexOf(from.data.provider) !== -1;
+        if (syncMoves) {
+            inReadyQueue = filesRemaining && filesRemaining.ready && filesRemaining.ready.length > 0;
+        }
+
+        if (filesRemaining.conflicts) {
+            inConflictsQueue = true;
+            if (filesRemaining.conflicts.length > 0) {
+                var s = filesRemaining.conflicts.length > 1 ? 's' : '';
+                var mithrilContent = m('div', { className: 'text-center' }, [
+                    m('p.h4', filesRemaining.conflicts.length + ' conflict' + s + ' left to resolve.'),
+                    m('div', {className: 'ball-pulse ball-scale-blue text-center'}, [
+                        m('div',''),
+                        m('div',''),
+                        m('div',''),
+                    ])
+                ]);
+                var header =  m('h3.break-word.modal-title', operation.action + ' "' + from.data.name +'"');
+                tb.modal.update(mithrilContent, m('', []), header);
+            } else {
+                // remove the empty queue to know there are no remaining conflicts next time
+                filesRemaining.conflicts = undefined;
+            }
+        }
+    }
+
     var ogParent = from.parentID;
     if (to.id === ogParent && (!rename || rename === from.data.name)){
-      return;
+        return;
     }
 
     if (operation === OPERATIONS.COPY) {
@@ -544,7 +637,7 @@ function doItemOp(operation, to, from, rename, conflict) {
     }
 
     var options = {};
-    if(from.data.provider === 'github' || from.data.provider === 'bitbucket'){
+    if(from.data.provider === 'github' || from.data.provider === 'bitbucket' || from.data.provider === 'gitlab'){
         options.branch = from.data.branch;
         moveSpec.branch = from.data.branch;
     }
@@ -556,25 +649,15 @@ function doItemOp(operation, to, from, rename, conflict) {
         type: 'POST',
         beforeSend: $osf.setXHRAuthorization,
         url: waterbutler.buildTreeBeardFileOp(from, options),
-        headers: {
-            'Content-Type': 'Application/json'
-        },
+        contentType: 'application/json',
         data: JSON.stringify(moveSpec)
     }).done(function(resp, _, xhr) {
         if (to.data.provider === from.provider) {
             tb.pendingFileOps.pop();
         }
         if (xhr.status === 202) {
-            var mithrilContent = m('div', [
-                m('h3.break-word', operation.action + ' "' + (from.data.materialized || '/') + '" to "' + (to.data.materialized || '/') + '" is taking a bit longer than expected.'),
-                m('p', 'We\'ll send you an email when it has finished.'),
-                m('p', 'In the mean time you can leave this page; your ' + operation.status + ' will still be completed.')
-            ]);
-            var mithrilButtons = m('div', [
-                m('span.tb-modal-btn', { 'class' : 'text-default', onclick : function() { tb.modal.dismiss(); }}, 'Close')
-            ]);
-            var header =  m('h3.modal-title.break-word', 'Operation Information');
-            tb.modal.update(mithrilContent, mithrilButtons, header);
+            var message =  'We\'ll send you an email when it has finished. <br> You can leave this page; your ' + operation.status + ' will still be completed.';
+            $osf.growl(operation.action + ' "' + (from.data.materialized || '/') + '" to "' + (to.data.materialized || '/') + '" is pending', message, 'info');
             return;
         }
         from.data = tb.options.lazyLoadPreprocess.call(this, resp).data;
@@ -602,6 +685,10 @@ function doItemOp(operation, to, from, rename, conflict) {
             from.open = true;
             from.load = true;
         }
+        var url = from.data.nodeUrl + 'files/' + from.data.provider + from.data.path;
+        if (notRenameOp) {
+            addFileStatus(tb, from, true, '', url, conflict);
+        }
         // no need to redraw because fangornOrderFolder does it
         orderFolder.call(tb, from.parent());
     }).fail(function(xhr, textStatus) {
@@ -622,9 +709,7 @@ function doItemOp(operation, to, from, rename, conflict) {
         } else if (xhr.status === 503) {
             message = textStatus;
         } else {
-            message = 'Please refresh the page or ' +
-                'contact <a href="mailto: support@osf.io">support@osf.io</a> if the ' +
-                'problem persists.';
+            message = 'Please refresh the page or contact ' + $osf.osfSupportLink() + ' if the problem persists.';
         }
 
         $osf.growl(operation.verb + ' failed.', message);
@@ -635,11 +720,15 @@ function doItemOp(operation, to, from, rename, conflict) {
                 requestData: moveSpec
             }
         });
-
+        if (notRenameOp) {
+            addFileStatus(tb, from, false, '', '', conflict);
+        }
         orderFolder.call(tb, from.parent());
     }).always(function(){
+
+        tb.pendingReadyFiles = tb.pendingReadyFiles.filter(function (file) { return file.data.id !== from.data.id; });
         from.inProgress = false;
-        if (SYNC_UPLOAD_ADDONS.indexOf(to.data.provider) !== -1){
+        if (notRenameOp && !tb.pendingReadyFiles.length){
             doSyncMove(tb, to.data.provider);
         }
     });
@@ -931,7 +1020,7 @@ function _fangornDropzoneError(treebeard, file, message, xhr) {
              msgText += '1. Cannot upload folders. <br>2. ';
          }
          msgText += 'Unable to reach the provider, please try again later. ';
-         msgText += 'If the problem persists, please contact support@osf.io.';
+         msgText += 'If the problem persists, please contact ' + $osf.osfSupportEmail() + '.';
     } else {
         //Osfstorage and most providers store message in {Object}message.{string}message,
         //but some, like Dataverse, have it in {string} message.
@@ -1029,9 +1118,9 @@ function _createFolder(event, dismissCallback, helpText) {
 
     var extra = {};
     var path = parent.data.path || '/';
-    var options = {name: val, kind: 'folder'};
+    var options = {name: val, kind: 'folder', waterbutlerURL: parent.data.waterbutlerURL};
 
-    if (parent.data.provider === 'github') {
+    if ((parent.data.provider === 'github') || (parent.data.provider === 'gitlab')) {
         extra.branch = parent.data.branch;
         options.branch = parent.data.branch;
     }
@@ -1040,7 +1129,7 @@ function _createFolder(event, dismissCallback, helpText) {
         method: 'PUT',
         background: true,
         config: $osf.setXHRAuthorization,
-        url: waterbutler.buildCreateFolderUrl(path, parent.data.provider, parent.data.nodeId, options)
+        url: waterbutler.buildCreateFolderUrl(path, parent.data.provider, parent.data.nodeId, options, extra)
     }).then(function(item) {
         item = tb.options.lazyLoadPreprocess.call(this, item).data;
         inheritFromParent({data: item}, parent, ['branch']);
@@ -1095,9 +1184,6 @@ function _removeEvent (event, items, col) {
         .fail(function(data){
             tb.modal.dismiss();
             tb.clearMultiselect();
-            if (data.responseJSON.message_long.indexOf('preprint') !== -1) {
-                $osf.growl('Delete failed', data.responseJSON.message_long);
-            }
             item.notify.update('Delete failed.', 'danger', undefined, 3000);
         });
     }
@@ -1109,16 +1195,24 @@ function _removeEvent (event, items, col) {
 
     function doDelete() {
         var folder = items[0];
+        var deleteMessage;
         if (folder.data.permissions.edit) {
-                var mithrilContent = m('div', [
+            if(folder.data.materialized === WIKI_IMAGES_FOLDER_PATH){
+                deleteMessage = m('p.text-danger',
+                    'This folder and all of its contents will be deleted. This folder is linked to ' +
+                    'your wiki(s). Deleting it will remove images embedded in your wiki(s). ' +
+                    'This action is irreversible.');
+            } else {
+                deleteMessage = m('p.text-danger',
+                    'This folder and ALL its contents will be deleted. This action is irreversible.');
+            }
 
-                        m('p.text-danger', 'This folder and ALL its contents will be deleted. This action is irreversible.')
-                    ]);
-                var mithrilButtons = m('div', [
-                        m('span.btn.btn-default', { onclick : function() { cancelDelete.call(tb); } }, 'Cancel'),
-                        m('span.btn.btn-danger', { onclick : function() { runDelete(folder); } }, 'Delete')
-                    ]);
-                tb.modal.update(mithrilContent, mithrilButtons, m('h3.break-word.modal-title', 'Delete "' + folder.data.name+ '"?'));
+            var mithrilContent = m('div', [deleteMessage]);
+            var mithrilButtons = m('div', [
+                m('span.btn.btn-default', { onclick : function() { cancelDelete.call(tb); } }, 'Cancel'),
+                m('span.btn.btn-danger', { onclick : function() { runDelete(folder); } }, 'Delete')
+            ]);
+            tb.modal.update(mithrilContent, mithrilButtons, m('h3.break-word.modal-title', 'Delete "' + folder.data.name+ '"?'));
         } else {
             folder.notify.update('You don\'t have permission to delete this file.', 'info', undefined, 3000);
         }
@@ -1126,10 +1220,16 @@ function _removeEvent (event, items, col) {
 
     // If there is only one item being deleted, don't complicate the issue:
     if(items.length === 1) {
-        var detail = 'This action is irreversible.';
+        var detail;
+        if(items[0].data.materialized.substring(0, WIKI_IMAGES_FOLDER_PATH.length) === WIKI_IMAGES_FOLDER_PATH) {
+            detail = m('span', 'This file may be linked to your wiki(s). Deleting it will remove the' +
+                ' image embedded in your wiki(s). ');
+        } else {
+            detail = '';
+        }
         if(items[0].kind !== 'folder'){
             var mithrilContentSingle = m('div', [
-                m('p', detail)
+                m('p.text-danger', detail, 'This action is irreversible.')
             ]);
             var mithrilButtonsSingle = m('div', [
                 m('span.btn.btn-default', { onclick : function() { cancelDelete(); } }, 'Cancel'),
@@ -1176,7 +1276,12 @@ function _removeEvent (event, items, col) {
                                 m('i.fa.fa-folder'), m('b', ' ' + n.data.name)
                                 ]);
                         }
-                        return m('.fangorn-canDelete.text-success.break-word', n.data.name);
+                        if(n.data.materialized.substring(0, WIKI_IMAGES_FOLDER_PATH.length) === WIKI_IMAGES_FOLDER_PATH) {
+                            return m('p.text-danger', m('b', n.data.name), ' may be linked to' +
+                                ' your wiki(s). Deleting them will remove images embedded in your wiki(s). ');
+                        } else {
+                            return m('.fangorn-canDelete.text-success.break-word', n.data.name);
+                        }
                     })
                 ]);
             mithrilButtonsMultiple = m('div', [
@@ -1378,18 +1483,19 @@ function _fangornTitleColumnHelper(tb, item, col, nameTitle, toUrl, classNameOpt
             attrs = {
                 className: classNameOption,
                 onclick: function(event) {
-                    // Prevent gotoFileEvent from getting
-                    // called more than once after user has clicked once
-                    if (item.loading) {
-                        return false;
-                    }
-                    item.loading = true;
                     event.stopImmediatePropagation();
                     gotoFileEvent.call(tb, item, toUrl);
                 }
             };
         }
-        return m('span', attrs, nameTitle);
+
+        var titleRow = m('span', attrs, nameTitle);
+
+        if  (item.data.extra.latestVersionSeen && item.data.extra.latestVersionSeen.seen === false && col.data === 'name') {
+            titleRow = m('strong', [titleRow]);
+        }
+
+        return titleRow;
     }
     if ((item.data.nodeType === 'project' || item.data.nodeType ==='component') && item.data.permissions.view) {
         return m('a.' + classNameOption, {href: '/' + item.data.nodeID.toString() + toUrl}, nameTitle);
@@ -1399,6 +1505,9 @@ function _fangornTitleColumnHelper(tb, item, col, nameTitle, toUrl, classNameOpt
 
 function _fangornTitleColumn(item, col) {
     var tb = this;
+    if(item.data.nodeRegion){
+        return _fangornTitleColumnHelper(tb, item, col, item.data.name + ' (' + item.data.nodeRegion + ')', '/', 'fg-file-links');
+    }
     return _fangornTitleColumnHelper(tb, item, col, item.data.name, '/', 'fg-file-links');
 }
 
@@ -1590,23 +1699,32 @@ function _loadTopLevelChildren() {
  * @this Treebeard.controller
  * @private
  */
-var NO_AUTO_EXPAND_PROJECTS = ['ezcuj', 'ecmz4', 'w4wvg', 'sn64d'];
+var NO_AUTO_EXPAND_PROJECTS = ['ezcuj', 'ecmz4', 'w4wvg', 'sn64d', 'pfdyw'];
 function expandStateLoad(item) {
     var tb = this,
+        icon = $('.tb-row[data-id="' + item.id + '"]').find('.tb-toggle-icon'),
+        toggleIcon = tbOptions.resolveToggle(item),
+        addonList = [],
         i;
+
     if (item.children.length > 0 && item.depth === 1) {
-        // NOTE: On the RPP *only*: Load the top-level project's OSF Storage
+        // NOTE: On the RPP and a few select projects *only*: Load the top-level project's OSF Storage
         // but do NOT lazy-load children in order to save hundreds of requests.
         // TODO: We might want to do this for every project, but that's TBD.
         // /sloria
         if (window.contextVars && window.contextVars.node && NO_AUTO_EXPAND_PROJECTS.indexOf(window.contextVars.node.id) > -1) {
-            tb.updateFolder(null, item.children[0]);
+            var osfsItems = item.children.filter(function(child) { return child.data.isAddonRoot && child.data.provider === 'osfstorage'; });
+            if (osfsItems.length) {
+                var osfsItem = osfsItems[0];
+                tb.updateFolder(null, osfsItem);
+            }
         } else {
             for (i = 0; i < item.children.length; i++) {
                 tb.updateFolder(null, item.children[i]);
             }
         }
     }
+
     if (item.children.length > 0 && item.depth === 2) {
         for (i = 0; i < item.children.length; i++) {
             if (item.children[i].data.isAddonRoot || item.children[i].data.addonFullName === 'OSF Storage' ) {
@@ -1614,7 +1732,33 @@ function expandStateLoad(item) {
             }
         }
     }
-        $('.fangorn-toolbar-icon').tooltip();
+
+    if (item.depth > 2 && !item.data.isAddonRoot && !item.data.type && item.children.length === 0 && item.open) {
+        // Displays loading indicator until request below completes
+        // Copied from toggleFolder() in Treebeard
+        if (icon.get(0)) {
+            m.render(icon.get(0), tbOptions.resolveRefreshIcon());
+        }
+        $osf.ajaxJSON(
+            'GET',
+            '/api/v1/project/' + item.data.nodeID + '/files/grid/'
+        ).done(function(response) {
+            var data = response.data[0].children;
+            tb.updateFolder(data, item);
+            tb.redraw();
+        }).fail(function(xhr) {
+            item.notify.update('Unable to retrieve components.', 'danger', undefined, 3000);
+            item.open = false;
+            Raven.captureMessage('Unable to retrieve components for node ' + item.data.nodeID, {
+                extra: {
+                    xhr: xhr
+                }
+            });
+        });
+    }
+
+    $('.fangorn-toolbar-icon').tooltip();
+
 }
 
 /**
@@ -1686,6 +1830,11 @@ function _renameEvent () {
     if  (val === item.name) {
         return;
     }
+    if(item.data.materialized === WIKI_IMAGES_FOLDER_PATH){
+        $osf.growl('Error', 'You cannot rename your Wiki images folder.');
+        return;
+    }
+
     checkConflictsRename(tb, item, val, doItemOp.bind(tb, OPERATIONS.RENAME, folder, item, val));
     tb.toolbarMode(toolbarModes.DEFAULT);
 }
@@ -1783,7 +1932,6 @@ var FGItemButtons = {
         var item = args.item;
         var rowButtons = [];
         var mode = args.mode;
-        var preprintPath = getPreprintPath(window.contextVars.node.preprintFileId);
         if (tb.options.placement !== 'fileview') {
             if (window.File && window.FileReader && item.kind === 'folder' && item.data.provider && item.data.permissions && item.data.permissions.edit) {
                 rowButtons.push(
@@ -1800,22 +1948,12 @@ var FGItemButtons = {
                         className: 'text-success'
                     }, 'Create Folder'));
                 if (item.data.path) {
-                    if (preprintPath && folderContainsPreprint(item, preprintPath)) {
-                        rowButtons.push(
-                            m.component(FGButton, {
-                                icon: 'fa fa-trash',
-                                tooltip: 'This folder contains a Preprint. You cannot delete Preprints, but you can upload a new version.',
-                                className: 'tb-disabled'
-                            }, 'Delete Folder'));
-                        reapplyTooltips();
-                    } else {
-                        rowButtons.push(
-                            m.component(FGButton, {
-                                onclick: function(event) {_removeEvent.call(tb, event, [item]); },
-                                icon: 'fa fa-trash',
-                                className : 'text-danger'
-                            }, 'Delete Folder'));
-                    }
+                    rowButtons.push(
+                        m.component(FGButton, {
+                            onclick: function(event) {_removeEvent.call(tb, event, [item]); },
+                            icon: 'fa fa-trash',
+                            className : 'text-danger'
+                        }, 'Delete Folder'));
                 }
             }
             if (item.kind === 'file') {
@@ -1839,24 +1977,13 @@ var FGItemButtons = {
                 if (item.data.permissions && item.data.permissions.edit) {
                     if (item.data.provider === 'osfstorage') {
                         if (!item.data.extra.checkout){
-                            if (preprintPath && preprintPath === item.data.path) {
-                                // Block delete for preprint files
-                                rowButtons.push(
-                                    m.component(FGButton, {
-                                        icon: 'fa fa-trash',
-                                        tooltip: 'This file is a Preprint. You cannot delete Preprints, but you can upload a new version.',
-                                        className: 'tb-disabled'
-                                    }, 'Delete'));
-                                // Tooltips don't seem to auto reapply, this forces them.
-                                reapplyTooltips();
-                            } else {
-                                rowButtons.push(
-                                    m.component(FGButton, {
-                                        onclick: function(event) { _removeEvent.call(tb, event, [item]); },
-                                        icon: 'fa fa-trash',
-                                        className: 'text-danger'
-                                    }, 'Delete'));
-                            }
+                            rowButtons.push(
+                                m.component(FGButton, {
+                                    onclick: function(event) { _removeEvent.call(tb, event, [item]); },
+                                    icon: 'fa fa-trash',
+                                    className: 'text-danger'
+                                }, 'Delete'));
+
                             rowButtons.push(
                                 m.component(FGButton, {
                                     onclick: function(event) {
@@ -2073,29 +2200,27 @@ var FGToolbar = {
         }
         // multiple selection icons
         // Special cased to not show 'delete multiple' for github or published dataverses
-        if(items.length > 1 && ctrl.tb.multiselected()[0].data.provider !== 'github' && ctrl.tb.options.placement !== 'fileview' && !(ctrl.tb.multiselected()[0].data.provider === 'dataverse' && ctrl.tb.multiselected()[0].parent().data.version === 'latest-published') ) {
+        if(
+            (items.length > 1) &&
+            (ctrl.tb.multiselected()[0].data.provider !== 'github') &&
+            (ctrl.tb.multiselected()[0].data.provider !== 'onedrive') &&
+            (ctrl.tb.options.placement !== 'fileview') &&
+            !(
+                (ctrl.tb.multiselected()[0].data.provider === 'dataverse') &&
+                (ctrl.tb.multiselected()[0].parent().data.version === 'latest-published')
+            )
+        ) {
             if (showDeleteMultiple(items)) {
-                var preprintPath = getPreprintPath(window.contextVars.node.preprintFileId);
-                if (preprintPath && multiselectContainsPreprint(items, preprintPath)) {
-                    generalButtons.push(
-                        m.component(FGButton, {
-                            icon: 'fa fa-trash',
-                            tooltip: 'One of these items is a Preprint or contains a Preprint. You cannot delete Preprints, but you can upload a new version.',
-                            className: 'tb-disabled'
-                        }, 'Delete Multiple')
-                    );
-                } else {
-                    generalButtons.push(
-                        m.component(FGButton, {
-                            onclick: function(event) {
-                                var configOption = resolveconfigOption.call(ctrl.tb, item, 'removeEvent', [event, items]); // jshint ignore:line
-                                if(!configOption){ _removeEvent.call(ctrl.tb, null, items); }
-                            },
-                            icon: 'fa fa-trash',
-                            className : 'text-danger'
-                        }, 'Delete Multiple')
-                    );
-                }
+                generalButtons.push(
+                    m.component(FGButton, {
+                        onclick: function(event) {
+                            var configOption = resolveconfigOption.call(ctrl.tb, item, 'removeEvent', [event, items]); // jshint ignore:line
+                            if(!configOption){ _removeEvent.call(ctrl.tb, null, items); }
+                        },
+                        icon: 'fa fa-trash',
+                        className : 'text-danger'
+                    }, 'Delete Multiple')
+                );
             }
         }
         generalButtons.push(
@@ -2319,12 +2444,20 @@ function _fangornOver(event, ui) {
  * @param success Boolean on whether upload actually happened
  * @param message String failure reason message, '' if success === true
  * @param link String with url to file, '' if success === false
+ * @param op String specifying type of move conflict resolution; ['keep', 'skip', 'replace']
  * @private
  */
-function addFileStatus(treebeard, file, success, message, link){
-    treebeard.uploadStates.push(
-        {'name': file.name, 'success': success, 'link': link, 'message': message}
-    );
+function addFileStatus(treebeard, file, success, message, link, op){
+    if (typeof op !== 'undefined'){
+        treebeard.moveStates.push(
+            {'name': file.data.name, 'success': success, 'link': link, 'op': op}
+        );
+    } else {
+        treebeard.uploadStates.push(
+            {'name': file.name, 'success': success, 'link': link, 'message': message}
+        );
+    }
+
 }
 
 /**
@@ -2397,25 +2530,102 @@ function _dropLogic(event, items, folder) {
         return tb.updateFolder(null, folder, _dropLogic.bind(tb, event, items, folder));
     }
 
-    if (SYNC_UPLOAD_ADDONS.indexOf(folder.data.provider) !== -1) {
-        tb.syncFileMoveCache = tb.syncFileMoveCache || {};
-        tb.syncFileMoveCache[folder.data.provider] = tb.syncFileMoveCache[folder.data.provider] || [];
-        $.each(items, function(index, item) {
-            tb.syncFileMoveCache[folder.data.provider].push({'item' : item, 'folder' : folder});
+    var toMove = checkConflicts(items, folder);
+
+    tb.syncFileMoveCache = tb.syncFileMoveCache || {};
+    tb.syncFileMoveCache[folder.data.provider] = tb.syncFileMoveCache[folder.data.provider] || {};
+    tb.moveStates = [];
+
+
+    // pendingReadyFiles is popped/pushed after a ready request's response is received, syncFileMoveCache is
+    // popped when a request is sent.
+    tb.pendingReadyFiles = toMove.ready;
+
+
+    if (toMove.ready.length > 0) {
+        tb.syncFileMoveCache[folder.data.provider].ready = tb.syncFileMoveCache[folder.data.provider].ready || [];
+        if (SYNC_UPLOAD_ADDONS.indexOf(folder.data.provider) !== -1) {
+            toMove.ready.forEach(function(item) {
+                tb.syncFileMoveCache[folder.data.provider].ready.push({'item' : item, 'folder' : folder});
+            });
+        } else {
+            MOVE_INTERVAL = setInterval(function() {
+                if(toMove.ready.length > 0) {
+                    doItemOp.call(tb, copyMode === 'move' ? OPERATIONS.MOVE : OPERATIONS.COPY, folder, toMove.ready.pop(), undefined, undefined);
+                } else {
+                    MOVE_INTERVAL = clearInterval(MOVE_INTERVAL);
+                }
+            }, MILLSECOND_PER_MOVE_REQUEST);
+        }
+    }
+
+    if (toMove.conflicts.length > 0) {
+        tb.syncFileMoveCache[folder.data.provider].conflicts = tb.syncFileMoveCache[folder.data.provider].conflicts || [];
+        toMove.conflicts.forEach(function(item) {
+            tb.syncFileMoveCache[folder.data.provider].conflicts.push({'item' : item, 'folder' : folder});
         });
-        doSyncMove(tb, folder.data.provider);
-    }else{
-        $.each(items, function(index, item) {
-            checkConflicts(tb, item, folder, doItemOp.bind(tb, copyMode === 'move' ? OPERATIONS.MOVE : OPERATIONS.COPY, folder, item, undefined));
-        });
+        // Conflicts are usually handled after ready requests are made, but here we have only conflicts so we start handling
+        // them immediately.
+        if (toMove.ready.length === 0) {
+            doSyncMove(tb, folder.data.provider);
+        }
     }
 }
 
+function displayMoveStats(tb) {
+   var moveStatuses = tb.moveStates;
+   var total = moveStatuses && moveStatuses.length;
+   if (moveStatuses.length) {
+       tb.moveStates = [];
+       var failed = 0;
+       var skipped = 0;
+       tb.modal.update(m('', [
+           m('', [
+               moveStatuses.map(function(status){
+                  if (!status.success){
+                      failed++;
+                  }
+                  if (status.op === 'skip'){
+                      skipped++;
+                  }
+                  return m('',
+                       [
+                           m('.row', [
+                               m((status.success ? 'a[href="' + status.link + '"]' : '') + '.col-sm-7', status.name),
+                               m('.col-sm-1', m(status.success ? '.fa.fa-check.text-success' : '.fa.fa-times.text-danger')),
+                               m('.col-sm-4' + (status.success ? '.text-info' : '.text-danger'), CONFLICT_INFO[status.op].passed)
+                           ]),
+                           m('hr')
+                       ]
+                   );
+               })
+           ])
+       ]), m('', [
+           m('a.btn.btn-primary', {onclick: function() {tb.modal.dismiss();}}, 'Done'), //jshint ignore:line
+       ]), m('', [
+              m('h3.break-word.modal-title', 'Move Status'),
+              m('p', [
+                  m('span', failed !== total ? total - failed + '/' + total + ' files successfully moved.': ''),
+                  m('span', skipped ? ' Skipped ' + skipped + '/' + total + ' files.': '')
+                ])
+      ]));
+    } else {
+        tb.modal.dismiss();
+    }
+
+}
+
 function doSyncMove(tb, provider){
-    var cache = tb.syncFileMoveCache[provider];
-    if (cache.length > 0){
-        var itemData = cache.pop();
-        checkConflicts(tb, itemData.item, itemData.folder, doItemOp.bind(tb, copyMode === 'move' ? OPERATIONS.MOVE : OPERATIONS.COPY, itemData.folder, itemData.item, undefined));
+    var cache = tb.syncFileMoveCache && tb.syncFileMoveCache[provider];
+    var itemData;
+    if (cache.conflicts && cache.conflicts.length > 0 && cache.ready && cache.ready.length === 0) {
+        itemData = cache.conflicts.pop();
+        displayConflict(tb, itemData.item, itemData.folder, doItemOp.bind(tb, copyMode === 'move' ? OPERATIONS.MOVE : OPERATIONS.COPY, itemData.folder, itemData.item, undefined));
+    } else if (cache.ready && cache.ready.length > 0) {
+        itemData = cache.ready.pop();
+        doItemOp.call(tb, copyMode === 'move' ? OPERATIONS.MOVE : OPERATIONS.COPY, itemData.folder, itemData.item, undefined, 'replace');
+    } else {
+        displayMoveStats(tb);
     }
 }
 
@@ -2484,7 +2694,9 @@ function isInvalidDropFolder(folder) {
         !folder.data.provider ||
         folder.data.status ||
         // cannot add to published dataverse
-        (folder.data.provider === 'dataverse' && folder.data.dataverseIsPublished)
+        (folder.data.provider === 'dataverse' && folder.data.dataverseIsPublished) ||
+        // no dropping into read-only providers
+        (READ_ONLY_ADDONS.indexOf(folder.data.provider) !== -1)
     ) {
         return true;
     }
@@ -2520,19 +2732,8 @@ function allowedToMove(folder, item, mustBeIntra) {
         item.data.permissions.edit &&
         (!mustBeIntra || (item.data.provider === folder.data.provider && item.data.nodeId === folder.data.nodeId)) &&
         !(item.data.provider === 'figshare' && item.data.extra && item.data.extra.status === 'public') &&
-        (item.data.provider !== 'bitbucket')
+        (READ_ONLY_ADDONS.indexOf(item.data.provider) === -1) && (READ_ONLY_ADDONS.indexOf(folder.data.provider) === -1)
     );
-}
-
-function folderContainsPreprint(item, preprintPath) {
-    // TODO This will only get children of open folders  -ajs
-    var children = getAllChildren(item);
-    for (var c = 0; c < children.length; c++) {
-        if (children[c].data.path === preprintPath) {
-            return true;
-        }
-    }
-    return false;
 }
 
 function showDeleteMultiple(items) {
@@ -2546,35 +2747,12 @@ function showDeleteMultiple(items) {
     return false;
 }
 
-function multiselectContainsPreprint(items, preprintPath) {
-    for (var i = 0; i < items.length; i++) {
-        var each = items[i];
-        if (each.data.kind === 'folder') {
-            if (folderContainsPreprint(each, preprintPath)) {
-                return true;
-            }
-        } else if (each.data.path === preprintPath) {
-            return true;
-        }
-    }
-    return false;
-}
-
-function getPreprintPath(preprintFileId) {
-    if (preprintFileId) {
-        return '/' + preprintFileId;
-    }
-    return null;
-}
-
 function getCopyMode(folder, items) {
     var tb = this;
     // Prevents side effects from rare instance where folders not fully populated
     if (typeof folder === 'undefined' || typeof folder.data === 'undefined') {
         return 'forbidden';
     }
-
-    var preprintPath = getPreprintPath(window.contextVars.node.preprintFileId);
     var canMove = true;
     var mustBeIntra = (folder.data.provider === 'github');
     // Folders cannot be copied to dataverse at all.  Folders may only be copied to figshare
@@ -2599,13 +2777,10 @@ function getCopyMode(folder, items) {
             if (children[c].inProgress || children[c].id === folder.id) {
                 return 'forbidden';
             }
-            if (children[c].data.path === preprintPath){
-                mustBeIntra = true;
-            }
         }
 
         if (canMove) {
-            mustBeIntra = mustBeIntra || item.data.provider === 'github' || preprintPath === item.data.path;
+            mustBeIntra = mustBeIntra || item.data.provider === 'github';
             canMove = allowedToMove(folder, item, mustBeIntra);
         }
     }
@@ -2735,10 +2910,12 @@ tbOptions = {
                 size = file.size / 1000000;
                 maxSize = item.data.accept.maxSize;
                 if (size > maxSize) {
-                    displaySize = Math.round(file.size / 10000) / 100;
-                    msgText = 'One of the files is too large (' + displaySize + ' MB). Max file size is ' + item.data.accept.maxSize + ' MB.';
-                    item.notify.update(msgText, 'warning', undefined, 3000);
-                    addFileStatus(treebeard, file, false, 'File is too large. Max file size is ' + item.data.accept.maxSize + ' MB.', '');
+                    displaySize = $osf.humanFileSize(file.size, true);
+                    maxSize = $osf.humanFileSize(maxSize * 1000000, true);
+                    msgText = 'This file is too large (' + displaySize + '). Max file size is ' + maxSize + '.';
+                    $osf.growl(msgText);
+                    addFileStatus(treebeard, file, false, msgText, '');
+                    removeFromUI(file, treebeard);
                     return false;
                 }
             }
@@ -2880,11 +3057,10 @@ Fangorn.DefaultOptions = tbOptions;
 module.exports = {
     Fangorn : Fangorn,
     allowedToMove : allowedToMove,
-    folderContainsPreprint : folderContainsPreprint,
     getAllChildren : getAllChildren,
     isInvalidDropFolder : isInvalidDropFolder,
     isInvalidDropItem : isInvalidDropItem,
     getCopyMode : getCopyMode,
-    multiselectContainsPreprint : multiselectContainsPreprint,
-    showDeleteMultiple : showDeleteMultiple
+    showDeleteMultiple : showDeleteMultiple,
+    checkConflicts : checkConflicts
 };

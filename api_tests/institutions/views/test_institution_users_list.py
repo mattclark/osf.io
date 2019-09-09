@@ -6,7 +6,9 @@ from osf_tests.factories import (
     UserFactory,
 )
 
+
 @pytest.mark.django_db
+@pytest.mark.enable_quickfiles_creation
 class TestInstitutionUsersList:
 
     def test_return_all_users(self, app):

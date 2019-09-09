@@ -1,25 +1,30 @@
 from __future__ import unicode_literals
 
 import json
+import requests
 
+from django.http import Http404
 from django.core import serializers
-from django.core.urlresolvers import reverse_lazy
+from django.core.urlresolvers import reverse_lazy, reverse
 from django.http import HttpResponse, JsonResponse
 from django.views.generic import ListView, DetailView, View, CreateView, DeleteView, TemplateView, UpdateView
+from django.views.generic.edit import FormView
+from django.core.management import call_command
+from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.forms.models import model_to_dict
-from django.shortcuts import redirect
+from django.shortcuts import redirect, render
 
 from admin.base import settings
 from admin.base.forms import ImportFileForm
-from admin.preprint_providers.forms import PreprintProviderForm
-from osf.models import PreprintProvider, Subject, NodeLicense
-from osf.models.preprint_provider import rules_to_subjects
+from admin.preprint_providers.forms import PreprintProviderForm, PreprintProviderCustomTaxonomyForm, PreprintProviderRegisterModeratorOrAdminForm
+from osf.models import PreprintProvider, Subject, NodeLicense, OSFUser
+from osf.models.provider import rules_to_subjects, WhitelistedSHAREPreprintProvider
+from website import settings as osf_settings
 
 # When preprint_providers exclusively use Subject relations for creation, set this to False
 SHOW_TAXONOMIES_IN_PREPRINT_PROVIDER_CREATE = True
-#TODO: Add subjects back in when custom taxonomies are fully integrated
-FIELDS_TO_NOT_IMPORT_EXPORT = ['access_token', 'share_source', 'subjects_acceptable', 'subjects']
+FIELDS_TO_NOT_IMPORT_EXPORT = ['access_token', 'share_source', 'subjects_acceptable', 'primary_collection']
 
 
 class PreprintProviderList(PermissionRequiredMixin, ListView):
@@ -41,7 +46,6 @@ class PreprintProviderList(PermissionRequiredMixin, ListView):
         return {
             'preprint_providers': query_set,
             'page': page,
-            'logohost': settings.OSF_URL
         }
 
 
@@ -96,16 +100,25 @@ class PreprintProviderDisplay(PermissionRequiredMixin, DetailView):
 
         subject_html = '<ul class="three-cols">'
         for parent in preprint_provider.top_level_subjects:
-            subject_html += '<li>{}</li>'.format(parent.text)
+            mapped_text = ''
+            if parent.bepress_subject and parent.text != parent.bepress_subject.text:
+                mapped_text = ' (mapped from {})'.format(parent.bepress_subject.text)
+            subject_html = subject_html + '<li>{}'.format(parent.text) + mapped_text + '</li>'
             child_html = '<ul>'
             for child in parent.children.all():
                 grandchild_html = ''
                 if child.id in subject_ids:
-                    child_html += '<li>{}</li>'.format(child.text)
+                    child_mapped_text = ''
+                    if child.bepress_subject and child.text != child.bepress_subject.text:
+                        child_mapped_text = ' (mapped from {})'.format(child.bepress_subject.text)
+                    child_html = child_html + '<li>{}'.format(child.text) + child_mapped_text + '</li>'
                     grandchild_html = '<ul>'
                     for grandchild in child.children.all():
                         if grandchild.id in subject_ids:
-                            grandchild_html += '<li>{}</li>'.format(grandchild.text)
+                            grandchild_mapped_text = ''
+                            if grandchild.bepress_subject and grandchild.text != grandchild.bepress_subject.text:
+                                grandchild_mapped_text = ' (mapped from {})'.format(grandchild.bepress_subject.text)
+                            grandchild_html = grandchild_html + '<li>{}'.format(grandchild.text) + grandchild_mapped_text + '</li>'
                     grandchild_html += '</ul>'
                 child_html += grandchild_html
 
@@ -114,15 +127,17 @@ class PreprintProviderDisplay(PermissionRequiredMixin, DetailView):
 
         subject_html += '</ul>'
         preprint_provider_attributes['subjects_acceptable'] = subject_html
+        preprint_provider_attributes['lower_name'] = preprint_provider._id
 
         kwargs['preprint_provider'] = preprint_provider_attributes
         kwargs['subject_ids'] = list(subject_ids)
-        kwargs['logohost'] = settings.OSF_URL
+        kwargs['logo'] = preprint_provider.get_asset_url('square_color_no_transparent')
         fields = model_to_dict(preprint_provider)
         fields['toplevel_subjects'] = list(subject_ids)
         fields['subjects_chosen'] = ', '.join(str(i) for i in subject_ids)
         kwargs['show_taxonomies'] = False if preprint_provider.subjects.exists() else True
         kwargs['form'] = PreprintProviderForm(initial=fields)
+        kwargs['taxonomy_form'] = PreprintProviderCustomTaxonomyForm()
         kwargs['import_form'] = ImportFileForm()
         kwargs['tinymce_apikey'] = settings.TINYMCE_APIKEY
         return kwargs
@@ -159,6 +174,48 @@ class PreprintProviderChangeForm(PermissionRequiredMixin, UpdateView):
         return reverse_lazy('preprint_providers:detail', kwargs={'preprint_provider_id': self.kwargs.get('preprint_provider_id')})
 
 
+class ProcessCustomTaxonomy(PermissionRequiredMixin, View):
+
+    permission_required = 'osf.change_preprintprovider'
+    raise_exception = True
+
+    def post(self, request, *args, **kwargs):
+        # Import here to avoid test DB access errors when importing preprint provider views
+        from osf.management.commands.populate_custom_taxonomies import validate_input, migrate
+
+        provider_form = PreprintProviderCustomTaxonomyForm(request.POST)
+        if provider_form.is_valid():
+            provider = PreprintProvider.objects.get(id=provider_form.cleaned_data['provider_id'])
+            try:
+                taxonomy_json = json.loads(provider_form.cleaned_data['custom_taxonomy_json'])
+                if request.is_ajax():
+                    # An ajax request is for validation only, so run that validation!
+                    try:
+                        response_data = validate_input(custom_provider=provider, data=taxonomy_json, add_missing=provider_form.cleaned_data['add_missing'])
+                        if response_data:
+                            added_subjects = [subject.text for subject in response_data]
+                            response_data = {'message': 'Custom taxonomy validated with added subjects: {}'.format(added_subjects), 'feedback_type': 'success'}
+                    except (RuntimeError, AssertionError) as script_feedback:
+                        response_data = {'message': script_feedback.message, 'feedback_type': 'error'}
+                    if not response_data:
+                        response_data = {'message': 'Custom taxonomy validated!', 'feedback_type': 'success'}
+                else:
+                    # Actually do the migration of the custom taxonomies
+                    migrate(provider=provider._id, data=taxonomy_json, add_missing=provider_form.cleaned_data['add_missing'])
+                    return redirect('preprint_providers:detail', preprint_provider_id=provider.id)
+            except (ValueError, RuntimeError) as error:
+                response_data = {
+                    'message': 'There is an error with the submitted JSON or the provider. Here are some details: ' + error.message,
+                    'feedback_type': 'error'
+                }
+        else:
+            response_data = {
+                'message': 'There is a problem with the form. Here are some details: ' + unicode(provider_form.errors),
+                'feedback_type': 'error'
+            }
+        # Return a JsonResponse with the JSON error or the validation error if it's not doing an actual migration
+        return JsonResponse(response_data)
+
 class ExportPreprintProvider(PermissionRequiredMixin, View):
     permission_required = 'osf.change_preprintprovider'
     raise_exception = True
@@ -167,10 +224,10 @@ class ExportPreprintProvider(PermissionRequiredMixin, View):
         preprint_provider = PreprintProvider.objects.get(id=self.kwargs['preprint_provider_id'])
         data = serializers.serialize('json', [preprint_provider])
         cleaned_data = json.loads(data)[0]
-        cleaned_fields = {key: value for key, value in cleaned_data['fields'].iteritems() if key not in FIELDS_TO_NOT_IMPORT_EXPORT}
+        cleaned_fields = {key: value for key, value in cleaned_data['fields'].items() if key not in FIELDS_TO_NOT_IMPORT_EXPORT}
         cleaned_fields['licenses_acceptable'] = [node_license.license_id for node_license in preprint_provider.licenses_acceptable.all()]
         cleaned_fields['default_license'] = preprint_provider.default_license.license_id if preprint_provider.default_license else ''
-        # cleaned_fields['subjects'] = self.serialize_subjects(preprint_provider)
+        cleaned_fields['subjects'] = self.serialize_subjects(preprint_provider)
         cleaned_data['fields'] = cleaned_fields
         filename = '{}_export.json'.format(preprint_provider.name)
         response = HttpResponse(json.dumps(cleaned_data), content_type='text/json')
@@ -178,7 +235,7 @@ class ExportPreprintProvider(PermissionRequiredMixin, View):
         return response
 
     def serialize_subjects(self, provider):
-        if provider._id != 'osf':
+        if provider._id != 'osf' and provider.subjects.count():
             result = {}
             result['include'] = []
             result['exclude'] = []
@@ -199,13 +256,13 @@ class DeletePreprintProvider(PermissionRequiredMixin, DeleteView):
 
     def delete(self, request, *args, **kwargs):
         preprint_provider = PreprintProvider.objects.get(id=self.kwargs['preprint_provider_id'])
-        if preprint_provider.preprint_services.count() > 0:
+        if preprint_provider.preprints.count() > 0:
             return redirect('preprint_providers:cannot_delete', preprint_provider_id=preprint_provider.pk)
         return super(DeletePreprintProvider, self).delete(request, *args, **kwargs)
 
     def get(self, request, *args, **kwargs):
         preprint_provider = PreprintProvider.objects.get(id=self.kwargs['preprint_provider_id'])
-        if preprint_provider.preprint_services.count() > 0:
+        if preprint_provider.preprints.count() > 0:
             return redirect('preprint_providers:cannot_delete', preprint_provider_id=preprint_provider.pk)
         return super(DeletePreprintProvider, self).get(request, *args, **kwargs)
 
@@ -231,8 +288,9 @@ class ImportPreprintProvider(PermissionRequiredMixin, View):
         if form.is_valid():
             file_str = self.parse_file(request.FILES['file'])
             file_json = json.loads(file_str)
+            current_fields = [f.name for f in PreprintProvider._meta.get_fields()]
             # make sure not to import an exported access token for SHARE
-            cleaned_result = {key: value for key, value in file_json['fields'].iteritems() if key not in FIELDS_TO_NOT_IMPORT_EXPORT}
+            cleaned_result = {key: value for key, value in file_json['fields'].items() if key not in FIELDS_TO_NOT_IMPORT_EXPORT and key in current_fields}
             preprint_provider = self.create_or_update_provider(cleaned_result)
             return redirect('preprint_providers:detail', preprint_provider_id=preprint_provider.id)
 
@@ -248,8 +306,7 @@ class ImportPreprintProvider(PermissionRequiredMixin, View):
             return PreprintProvider.objects.get(id=page_provider_id)
 
     def add_subjects(self, provider, subject_data):
-        from osf.management.commands.populate_custom_taxonomies import migrate
-        migrate(provider._id, subject_data)
+        call_command('populate_custom_taxonomies', '--provider', provider._id, '--data', json.dumps(subject_data))
 
     def create_or_update_provider(self, provider_data):
         provider = self.get_page_provider()
@@ -258,7 +315,7 @@ class ImportPreprintProvider(PermissionRequiredMixin, View):
         subject_data = provider_data.pop('subjects', False)
 
         if provider:
-            for key, val in provider_data.iteritems():
+            for key, val in provider_data.items():
                 setattr(provider, key, val)
         else:
             provider = PreprintProvider(**provider_data)
@@ -273,6 +330,53 @@ class ImportPreprintProvider(PermissionRequiredMixin, View):
         if subject_data and not provider.subjects.count():
             self.add_subjects(provider, subject_data)
         return provider
+
+
+class ShareSourcePreprintProvider(PermissionRequiredMixin, View):
+    permission_required = 'osf.change_preprintprovider'
+    raise_exception = True
+
+    def get(self, request, *args, **kwargs):
+        preprint_provider = PreprintProvider.objects.get(id=self.kwargs['preprint_provider_id'])
+
+        resp_json = self.share_post(preprint_provider)
+        preprint_provider.share_source = resp_json['data']['attributes']['longTitle']
+        for data in resp_json['included']:
+            if data['type'] == 'ShareUser':
+                preprint_provider.access_token = data['attributes']['token']
+        preprint_provider.save()
+        return redirect(reverse_lazy('preprint_providers:detail', kwargs={'preprint_provider_id': preprint_provider.id}))
+
+    def share_post(self, preprint_provider):
+        if preprint_provider.share_source or preprint_provider.access_token:
+            raise ValueError('Cannot update share_source or access_token because one or the other already exists')
+        if not osf_settings.SHARE_API_TOKEN or not osf_settings.SHARE_URL:
+            raise ValueError('SHARE_API_TOKEN or SHARE_URL not set')
+        if not preprint_provider.get_asset_url('square_color_no_transparent'):
+            raise ValueError('Unable to find "square_color_no_transparent" icon for provider')
+
+        debug_prepend = ''
+        if osf_settings.DEBUG_MODE or osf_settings.SHARE_PREPRINT_PROVIDER_PREPEND:
+            assert osf_settings.SHARE_PREPRINT_PROVIDER_PREPEND, 'Local SHARE_PREPRINT_PROVIDER_PREPEND (e.g., \'alexschiller\') must be set when in DEBUG_MODE'
+            debug_prepend = '{}_'.format(osf_settings.SHARE_PREPRINT_PROVIDER_PREPEND)
+
+        return requests.post(
+            '{}api/v2/sources/'.format(osf_settings.SHARE_URL),
+            json={
+                'data': {
+                    'type': 'Source',
+                    'attributes': {
+                        'homePage': preprint_provider.domain if preprint_provider.domain else '{}/preprints/{}/'.format(osf_settings.DOMAIN, preprint_provider._id),
+                        'longTitle': debug_prepend + preprint_provider.name,
+                        'iconUrl': preprint_provider.get_asset_url('square_color_no_transparent')
+                    }
+                }
+            },
+            headers={
+                'Authorization': 'Bearer {}'.format(osf_settings.SHARE_API_TOKEN),
+                'Content-Type': 'application/vnd.api+json'
+            }
+        ).json()
 
 
 class SubjectDynamicUpdateView(PermissionRequiredMixin, View):
@@ -313,3 +417,68 @@ class CreatePreprintProvider(PermissionRequiredMixin, CreateView):
         kwargs['show_taxonomies'] = SHOW_TAXONOMIES_IN_PREPRINT_PROVIDER_CREATE
         kwargs['tinymce_apikey'] = settings.TINYMCE_APIKEY
         return super(CreatePreprintProvider, self).get_context_data(*args, **kwargs)
+
+
+class SharePreprintProviderWhitelist(PermissionRequiredMixin, View):
+    permission_required = 'osf.change_preprintprovider'
+    raise_exception = True
+    template_name = 'preprint_providers/whitelist.html'
+
+    def post(self, request):
+        providers_added = json.loads(request.body).get('added')
+        if len(providers_added) != 0:
+            for item in providers_added:
+                WhitelistedSHAREPreprintProvider.objects.get_or_create(provider_name=item)
+        return HttpResponse(200)
+
+    def delete(self, request):
+        providers_removed = json.loads(request.body).get('removed')
+        if len(providers_removed) != 0:
+            for item in providers_removed:
+                WhitelistedSHAREPreprintProvider.objects.get(provider_name=item).delete()
+        return HttpResponse(200)
+
+    def get(self, request):
+        share_api_url = settings.SHARE_URL
+        api_v2_url = settings.API_DOMAIN + settings.API_BASE
+        return render(request, self.template_name, {'share_api_url': share_api_url, 'api_v2_url': api_v2_url})
+
+
+class PreprintProviderRegisterModeratorOrAdmin(PermissionRequiredMixin, FormView):
+    permission_required = 'osf.change_preprintprovider'
+    raise_exception = True
+    template_name = 'preprint_providers/register_moderator_admin.html'
+    form_class = PreprintProviderRegisterModeratorOrAdminForm
+
+    def get_form_kwargs(self):
+        kwargs = super(PreprintProviderRegisterModeratorOrAdmin, self).get_form_kwargs()
+        kwargs['provider_id'] = self.kwargs['preprint_provider_id']
+        return kwargs
+
+    def get_context_data(self, **kwargs):
+        context = super(PreprintProviderRegisterModeratorOrAdmin, self).get_context_data(**kwargs)
+        context['provider_name'] = PreprintProvider.objects.get(id=self.kwargs['preprint_provider_id']).name
+        return context
+
+    def form_valid(self, form):
+        user_id = form.cleaned_data.get('user_id')
+        osf_user = OSFUser.load(user_id)
+
+        if not osf_user:
+            raise Http404('OSF user with id "{}" not found. Please double check.'.format(user_id))
+
+        for group in form.cleaned_data.get('group_perms'):
+            osf_user.groups.add(group)
+            split = group.name.split('_')
+            group_type = split[0]
+            if group_type == 'reviews':
+                provider_id = split[2]
+                provider = PreprintProvider.objects.get(id=provider_id)
+                provider.notification_subscriptions.get(event_name='new_pending_submissions').add_user_to_subscription(osf_user, 'email_transactional')
+
+        osf_user.save()
+        messages.success(self.request, 'Permissions update successful for OSF User {}!'.format(osf_user.username))
+        return super(PreprintProviderRegisterModeratorOrAdmin, self).form_valid(form)
+
+    def get_success_url(self):
+        return reverse('preprint_providers:register_moderator_admin', kwargs={'preprint_provider_id': self.kwargs['preprint_provider_id']})

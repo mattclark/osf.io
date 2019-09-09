@@ -5,11 +5,11 @@ require('jquery-blockui');
 var Raven = require('raven-js');
 var moment = require('moment');
 var URI = require('URIjs');
+var Cookie  = require('js-cookie');
 var bootbox = require('bootbox');
 var lodashGet = require('lodash.get');
 var KeenTracker = require('js/keen');
 var linkify = require('linkifyjs/html');
-
 
 // TODO: For some reason, this require is necessary for custom ko validators to work
 // Why?!
@@ -88,6 +88,14 @@ var ajaxJSON = function(method, url, options) {
         ajaxFields.xhrFields =  {
             withCredentials: true
         };
+        // Add X-CSRFToken to v2 requests
+        if (window.contextVars.apiV2Domain &&
+            window.contextVars.csrfCookieName &&
+            url.match(new RegExp('^' + window.contextVars.apiV2Domain))) {
+              ajaxFields.headers = {
+                  'X-CSRFToken': Cookie.get(window.contextVars.csrfCookieName),
+              };
+        }
     }
     $.extend(true, ajaxFields, opts.fields);
 
@@ -282,8 +290,28 @@ var setXHRAuthorization = function (xhr, options) {
 };
 
 var errorDefaultShort = 'Unable to resolve';
-var errorDefaultLong = 'OSF was unable to resolve your request. If this issue persists, ' +
-    'please report it to <a href="mailto:support@osf.io">support@osf.io</a>.';
+
+function osfSupportEmail() {
+    if(window.contextVars){
+        return window.contextVars.osfSupportEmail;
+    }
+    // currently have problem with osfLanguage.js doesn't have window imported,
+    // change this hard coded address later when we have improvement to that
+    return 'support@osf.io';
+}
+
+function osfSupportLink() {
+    return '<a href="mailto:' + osfSupportEmail() + '">' + osfSupportEmail() +'</a>';
+}
+
+function refreshOrSupport() {
+    return 'Please refresh the page and try again or contact ' + osfSupportLink() + ' if the problem persists.';
+}
+
+var errorDefaultLong = function(){
+    return 'OSF was unable to resolve your request. If this issue persists, ' +
+        'please report it to ' + osfSupportLink() + '.';
+};
 
 var handleAddonApiHTTPError = function(error){
     var response;
@@ -293,14 +321,14 @@ var handleAddonApiHTTPError = function(error){
         response = '';
     }
     var title = response.message_short || errorDefaultShort;
-    var message = response.message_long || errorDefaultLong;
+    var message = response.message_long || errorDefaultLong();
 
     $.osf.growl(title, message);
 };
 
 var handleJSONError = function(response) {
     var title = (response.responseJSON && response.responseJSON.message_short) || errorDefaultShort;
-    var message = (response.responseJSON && response.responseJSON.message_long) || errorDefaultLong;
+    var message = (response.responseJSON && response.responseJSON.message_long) || errorDefaultLong();
     // We can reach this error handler when the user leaves a page while a request is pending. In that
     // case, response.status === 0, and we don't want to show an error message.
     if (response && response.status && response.status >= 400) {
@@ -1079,4 +1107,7 @@ module.exports = window.$.osf = {
     linkifyText: linkifyText,
     getConfirmationString: getConfirmationString,
     decodeText: decodeText,
+    osfSupportEmail: osfSupportEmail,
+    osfSupportLink: osfSupportLink,
+    refreshOrSupport: refreshOrSupport,
 };

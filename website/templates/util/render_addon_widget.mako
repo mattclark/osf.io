@@ -1,6 +1,6 @@
 <%def name="render_addon_widget(addon_name, addon_data)">
 
-    % if addon_data['complete'] or 'write' in user['permissions']:
+    % if addon_data['complete'] or permissions.WRITE in user['permissions']:
         <div class="panel panel-default" name="${addon_data['short_name']}">
             <div class="panel-heading clearfix">
                 <h3 class="panel-title">${addon_data['full_name']}</h3>
@@ -127,7 +127,9 @@
                     </div>
                     <div id="${addon_data['short_name']}Widget" class="citation-widget">
                         <div class="spinner-loading-wrapper">
-                            <div class="logo-spin logo-lg"></div>
+                            <div class="ball-scale ball-scale-blue">
+                                <div></div>
+                            </div>
                             <p class="m-t-sm fg-load-message"> Loading citations...</p>
                         </div>
                     </div>
@@ -138,8 +140,8 @@
             % else:
                 <div class='addon-config-error p-sm'>
                     ${addon_data['full_name']} add-on is not configured properly.
-                    % if user['is_contributor']:
-                        Configure this add-on on the <a href="${node['url']}settings/">settings</a> page.
+                    % if user['is_contributor_or_group_member']:
+                        Configure this add-on on the <a href="${node['url']}addons/">add-ons</a> page.
                     % endif
                 </div>
 

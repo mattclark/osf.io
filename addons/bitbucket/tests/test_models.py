@@ -49,7 +49,7 @@ class TestNodeSettings(models.OAuthAddonNodeSettingsTestSuiteMixin, unittest.Tes
         pass
 
     def test_serialize_settings(self):
-        # Bitbucket's serialized_settings are a little different from 
+        # Bitbucket's serialized_settings are a little different from
         # common storage addons.
         settings = self.node_settings.serialize_waterbutler_settings()
         expected = {'owner': self.node_settings.user, 'repo': self.node_settings.repo}
@@ -111,12 +111,9 @@ class TestCallbacks(OsfTestCase):
 
         super(TestCallbacks, self).setUp()
 
-        self.project = ProjectFactory.build()
+        self.project = ProjectFactory()
         self.consolidated_auth = Auth(self.project.creator)
-        self.project.creator.save()
         self.non_authenticator = UserFactory()
-        self.non_authenticator.save()
-        self.project.save()
         self.project.add_contributor(
             contributor=self.non_authenticator,
             auth=self.consolidated_auth,
@@ -126,7 +123,6 @@ class TestCallbacks(OsfTestCase):
         self.project.creator.add_addon('bitbucket')
         self.external_account = BitbucketAccountFactory()
         self.project.creator.external_accounts.add(self.external_account)
-        self.project.creator.save()
         self.node_settings = self.project.get_addon('bitbucket')
         self.user_settings = self.project.creator.get_addon('bitbucket')
         self.node_settings.user_settings = self.user_settings
@@ -168,6 +164,20 @@ class TestCallbacks(OsfTestCase):
             repo=self.node_settings.repo,
         )
         assert_true(message)
+        assert_in('Users can view the contents of this private Bitbucket repository through this public project.', message[0])
+
+    @mock.patch('addons.bitbucket.api.BitbucketClient.repo')
+    def test_before_page_load_repo_deleted(self, mock_repo):
+        self.project.is_public = True
+        self.project.save()
+        mock_repo.return_value = None
+        message = self.node_settings.before_page_load(self.project, self.project.creator)
+        mock_repo.assert_called_with(
+            user=self.node_settings.user,
+            repo=self.node_settings.repo,
+        )
+        assert_true(message)
+        assert_in('has been deleted.', message[0])
 
     @mock.patch('addons.bitbucket.api.BitbucketClient.repo')
     def test_before_page_load_osf_private_bb_public(self, mock_repo):
@@ -178,6 +188,7 @@ class TestCallbacks(OsfTestCase):
             repo=self.node_settings.repo,
         )
         assert_true(message)
+        assert_in('The files in this Bitbucket repo can be viewed on Bitbucket', message[0])
 
     @mock.patch('addons.bitbucket.api.BitbucketClient.repo')
     def test_before_page_load_osf_private_bb_private(self, mock_repo):
@@ -218,7 +229,7 @@ class TestCallbacks(OsfTestCase):
             None
         )
         assert_true(message)
-        assert_not_in("You can re-authenticate", message)
+        assert_not_in('You can re-authenticate', message)
 
     def test_after_remove_contributor_authenticator_not_self(self):
         auth = Auth(user=self.non_authenticator)
@@ -230,7 +241,7 @@ class TestCallbacks(OsfTestCase):
             None
         )
         assert_true(message)
-        assert_in("You can re-authenticate", message)
+        assert_in('You can re-authenticate', message)
 
     def test_after_remove_contributor_not_authenticator(self):
         self.node_settings.after_remove_contributor(

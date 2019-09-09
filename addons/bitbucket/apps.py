@@ -19,14 +19,13 @@ def bitbucket_hgrid_data(node_settings, auth, **kwargs):
     connection = BitbucketClient(access_token=node_settings.external_account.oauth_key)
 
     node = node_settings.owner
-    if node.is_public and not node.is_contributor(auth.user):
-        try:
-            connection.repo(node_settings.user, node_settings.repo)
-        except NotFoundError:
+    if node.is_public and not node.is_contributor_or_group_member(auth.user):
+
+        repo = connection.repo(node_settings.user, node_settings.repo)
+        if not repo:
             # TODO: Add warning message
             logger.error('Could not access Bitbucket repo')
             return None
-
     try:
         branch, sha, branches = get_refs(
             node_settings,

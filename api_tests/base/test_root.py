@@ -1,21 +1,25 @@
 # -*- coding: utf-8 -*-
 import itsdangerous
 import mock
-from nose.tools import *  # flake8: noqa
+from nose.tools import *  # noqa:
 import unittest
+from django.utils import timezone
 
+import pytest
 from tests.base import ApiTestCase
 from osf_tests.factories import (
-    AuthUserFactory
+    AuthUserFactory,
+    ApiOAuth2ScopeFactory,
 )
 
 from api.base.settings.defaults import API_BASE
 
-from framework.auth.oauth_scopes import public_scopes
 from framework.auth.cas import CasResponse
 from website import settings
 from osf.models import ApiOAuth2PersonalToken, Session
+from osf.utils.permissions import ADMIN
 
+@pytest.mark.enable_quickfiles_creation
 class TestWelcomeToApi(ApiTestCase):
     def setUp(self):
         super(TestWelcomeToApi, self).setUp()
@@ -36,7 +40,28 @@ class TestWelcomeToApi(ApiTestCase):
         res = self.app.get(self.url, auth=self.user.auth)
         assert_equal(res.status_code, 200)
         assert_equal(res.content_type, 'application/vnd.api+json')
-        assert_equal(res.json['meta']['current_user']['data']['attributes']['given_name'], self.user.given_name)
+        assert_equal(
+            res.json['meta']['current_user']['data']['attributes']['given_name'],
+            self.user.given_name
+        )
+
+    def test_current_user_accepted_tos(self):
+        res = self.app.get(self.url, auth=self.user.auth)
+        assert_equal(res.status_code, 200)
+        assert_equal(res.content_type, 'application/vnd.api+json')
+        assert_equal(
+            res.json['meta']['current_user']['data']['attributes']['accepted_terms_of_service'],
+            False
+        )
+        self.user.accepted_terms_of_service = timezone.now()
+        self.user.save()
+        res = self.app.get(self.url, auth=self.user.auth)
+        assert_equal(res.status_code, 200)
+        assert_equal(res.content_type, 'application/vnd.api+json')
+        assert_equal(
+            res.json['meta']['current_user']['data']['attributes']['accepted_terms_of_service'],
+            True
+        )
 
     def test_returns_302_redirect_for_base_url(self):
         res = self.app.get('/')
@@ -51,54 +76,76 @@ class TestWelcomeToApi(ApiTestCase):
 
         res = self.app.get(self.url)
         assert_equal(res.status_code, 200)
-        assert_equal(res.json['meta']['admin'], True)
+        assert_equal(res.json['meta'][ADMIN], True)
 
     def test_basic_auth_does_not_have_admin(self):
         res = self.app.get(self.url, auth=self.user.auth)
         assert_equal(res.status_code, 200)
-        assert_not_in('admin', res.json['meta'].keys())
+        assert_not_in(ADMIN, res.json['meta'].keys())
 
     @mock.patch('api.base.authentication.drf.OSFCASAuthentication.authenticate')
-    @unittest.skipIf(not settings.DEV_MODE, 'DEV_MODE disabled, osf.admin unavailable')  # TODO: Remove when available outside of DEV_MODE
+    # TODO: Remove when available outside of DEV_MODE
+    @unittest.skipIf(
+        not settings.DEV_MODE,
+        'DEV_MODE disabled, osf.admin unavailable'
+    )
     def test_admin_scoped_token_has_admin(self, mock_auth):
         token = ApiOAuth2PersonalToken(
             owner=self.user,
             name='Admin Token',
-            scopes='osf.admin'
         )
+        token.save()
+        scope = ApiOAuth2ScopeFactory()
+        scope.name = 'osf.admin'
+        scope.save()
+        token.scopes.add(scope)
 
         mock_cas_resp = CasResponse(
             authenticated=True,
             user=self.user._id,
             attributes={
                 'accessToken': token.token_id,
-                'accessTokenScope': [s for s in token.scopes.split(' ')]
+                'accessTokenScope': [s.name for s in token.scopes.all()]
             }
         )
         mock_auth.return_value = self.user, mock_cas_resp
-        res = self.app.get(self.url, headers={'Authorization': 'Bearer {}'.format(token.token_id)})
+        res = self.app.get(
+            self.url,
+            headers={
+                'Authorization': 'Bearer {}'.format(token.token_id)
+            }
+        )
 
         assert_equal(res.status_code, 200)
-        assert_equal(res.json['meta']['admin'], True)
+        assert_equal(res.json['meta'][ADMIN], True)
 
     @mock.patch('api.base.authentication.drf.OSFCASAuthentication.authenticate')
     def test_non_admin_scoped_token_does_not_have_admin(self, mock_auth):
         token = ApiOAuth2PersonalToken(
             owner=self.user,
             name='Admin Token',
-            scopes=' '.join([key for key in public_scopes if key != 'osf.admin'])
         )
+        token.save()
+        scope = ApiOAuth2ScopeFactory()
+        scope.name = 'osf.full_write'
+        scope.save()
+        token.scopes.add(scope)
 
         mock_cas_resp = CasResponse(
             authenticated=True,
             user=self.user._id,
             attributes={
                 'accessToken': token.token_id,
-                'accessTokenScope': [s for s in token.scopes.split(' ')]
+                'accessTokenScope': [s.name for s in token.scopes.all()]
             }
         )
         mock_auth.return_value = self.user, mock_cas_resp
-        res = self.app.get(self.url, headers={'Authorization': 'Bearer {}'.format(token.token_id)})
+        res = self.app.get(
+            self.url,
+            headers={
+                'Authorization': 'Bearer {}'.format(token.token_id)
+            }
+        )
 
         assert_equal(res.status_code, 200)
-        assert_not_in('admin', res.json['meta'].keys())
+        assert_not_in(ADMIN, res.json['meta'].keys())

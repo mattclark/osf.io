@@ -2,6 +2,7 @@
 import datetime
 import mock
 import os
+import pytest
 import time
 import unittest
 from django.utils import timezone
@@ -11,20 +12,19 @@ from nose.tools import *  # noqa (PEP8 asserts)
 import blinker
 
 from tests.base import OsfTestCase, DbTestCase
-from osf_tests.factories import RegistrationFactory, UserFactory
+from osf_tests.factories import RegistrationFactory, UserFactory, fake_email
 
 from framework.auth.utils import generate_csl_given_name
 from framework.routing import Rule, json_renderer
-from framework.utils import secure_filename
+from framework.utils import secure_filename, throttle_period_expired
+from api.base.utils import waterbutler_api_url_for
+from osf.utils.functional import rapply
 from website.routes import process_rules, OsfWebRenderer
 from website import settings
-from website import util
 from website.util import paths
-from website.util.mimetype import get_mimetype
-from website.util import web_url_for, api_url_for, is_json_request, waterbutler_url_for, conjunct, api_v2_url
+from website.util import web_url_for, api_url_for, is_json_request, conjunct, api_v2_url
 from website.project import utils as project_utils
 from website.profile import utils as profile_utils
-from website.util.time import throttle_period_expired
 
 try:
     import magic  # noqa
@@ -54,7 +54,6 @@ class TestTimeUtils(unittest.TestCase):
 
         is_expired = throttle_period_expired(timestamp=(timestamp - 31), throttle=30)
         assert_true(is_expired)
-
 
 class TestUrlForHelpers(unittest.TestCase):
 
@@ -96,13 +95,13 @@ class TestUrlForHelpers(unittest.TestCase):
         full_url = api_v2_url('/nodes/abcd3/contributors/',
                               base_route='http://localhost:8000/',
                               base_prefix='v2/')
-        assert_equal(full_url, "http://localhost:8000/v2/nodes/abcd3/contributors/")
+        assert_equal(full_url, 'http://localhost:8000/v2/nodes/abcd3/contributors/')
 
         # Handles URL the same way whether or not user enters a leading slash
         full_url = api_v2_url('nodes/abcd3/contributors/',
                               base_route='http://localhost:8000/',
                               base_prefix='v2/')
-        assert_equal(full_url, "http://localhost:8000/v2/nodes/abcd3/contributors/")
+        assert_equal(full_url, 'http://localhost:8000/v2/nodes/abcd3/contributors/')
 
     def test_api_v2_url_with_params(self):
         """Handles- and encodes- URLs with parameters (dict and kwarg) correctly"""
@@ -111,14 +110,14 @@ class TestUrlForHelpers(unittest.TestCase):
                               base_route='https://api.osf.io/',
                               base_prefix='v2/',
                               page_size=10)
-        assert_equal(full_url, "https://api.osf.io/v2/nodes/abcd3/contributors/?filter%5Bfullname%5D=bob&page_size=10")
+        assert_equal(full_url, 'https://api.osf.io/v2/nodes/abcd3/contributors/?filter%5Bfullname%5D=bob&page_size=10')
 
     def test_api_v2_url_base_path(self):
         """Given a blank string, should return the base path (domain + port + prefix) with no extra cruft at end"""
         full_url = api_v2_url('',
                               base_route='http://localhost:8000/',
                               base_prefix='v2/')
-        assert_equal(full_url, "http://localhost:8000/v2/")
+        assert_equal(full_url, 'http://localhost:8000/v2/')
 
     def test_web_url_for(self):
         with self.app.test_request_context():
@@ -204,83 +203,28 @@ class TestUrlForHelpers(unittest.TestCase):
         with self.app.test_request_context(content_type='application/json;charset=UTF-8'):
             assert_true(is_json_request())
 
-    def test_waterbutler_url_for(self):
+    def test_waterbutler_api_url_for(self):
         with self.app.test_request_context():
-            url = waterbutler_url_for('upload', 'provider', 'path', mock.Mock(_id='_id'))
+            url = waterbutler_api_url_for('fakeid', 'provider', '/path', base_url=settings.WATERBUTLER_URL)
+        assert_in('/fakeid/', url)
+        assert_in('/path', url)
+        assert_in('/providers/provider/', url)
+        assert_in(settings.WATERBUTLER_URL, url)
 
-        assert_in('nid=_id', url)
-        assert_in('/file?', url)
-        assert_in('path=path', url)
-        assert_in('provider=provider', url)
+        with self.app.test_request_context():
+            url = waterbutler_api_url_for('fakeid', 'provider', '/path')
+        assert_in(settings.WATERBUTLER_URL, url)
 
-    def test_waterbutler_url_for_internal(self):
+    def test_waterbutler_api_url_for_internal(self):
         settings.WATERBUTLER_INTERNAL_URL = 'http://1.2.3.4:7777'
         with self.app.test_request_context():
-            url = waterbutler_url_for('upload', 'provider', 'path', mock.Mock(_id='_id'), _internal=True)
+            url = waterbutler_api_url_for('fakeid', 'provider', '/path', _internal=True, base_url=settings.WATERBUTLER_INTERNAL_URL)
 
         assert_not_in(settings.WATERBUTLER_URL, url)
         assert_in(settings.WATERBUTLER_INTERNAL_URL, url)
-        assert_in('nid=_id', url)
-        assert_in('/file?', url)
-        assert_in('path=path', url)
-        assert_in('provider=provider', url)
-
-    def test_waterbutler_url_for_implicit_cookie(self):
-        with self.app.test_request_context() as context:
-            context.request.cookies = {settings.COOKIE_NAME: 'cookie'}
-            url = waterbutler_url_for('upload', 'provider', 'path', mock.Mock(_id='_id'))
-
-        assert_in('nid=_id', url)
-        assert_in('/file?', url)
-        assert_in('path=path', url)
-        assert_in('cookie=cookie', url)
-        assert_in('provider=provider', url)
-
-    def test_waterbutler_url_for_cookie_not_required(self):
-        with self.app.test_request_context():
-            url = waterbutler_url_for('upload', 'provider', 'path', mock.Mock(_id='_id'))
-
-        assert_not_in('cookie', url)
-
-        assert_in('nid=_id', url)
-        assert_in('/file?', url)
-        assert_in('path=path', url)
-        assert_in('provider=provider', url)
-
-
-class TestGetMimeTypes(unittest.TestCase):
-    def test_get_markdown_mimetype_from_filename(self):
-        name = 'test.md'
-        mimetype = get_mimetype(name)
-        assert_equal('text/x-markdown', mimetype)
-
-    @unittest.skipIf(not LIBMAGIC_AVAILABLE, 'Must have python-magic and libmagic installed')
-    def test_unknown_extension_with_no_contents_not_real_file_results_in_exception(self):
-        name = 'test.thisisnotarealextensionidonotcarwhatyousay'
-        with assert_raises(IOError):
-            get_mimetype(name)
-
-    @unittest.skipIf(LIBMAGIC_AVAILABLE, 'This test only runs if python-magic and libmagic are not installed')
-    def test_unknown_extension_with_no_contents_not_real_file_results_in_exception2(self):
-        name = 'test.thisisnotarealextensionidonotcarwhatyousay'
-        mime_type = get_mimetype(name)
-        assert_equal(None, mime_type)
-
-    @unittest.skipIf(not LIBMAGIC_AVAILABLE, 'Must have python-magic and libmagic installed')
-    def test_unknown_extension_with_real_file_results_in_python_mimetype(self):
-        name = 'test_views.notarealfileextension'
-        maybe_python_file = os.path.join(HERE, 'test_files', name)
-        mimetype = get_mimetype(maybe_python_file)
-        assert_equal('text/x-python', mimetype)
-
-    @unittest.skipIf(not LIBMAGIC_AVAILABLE, 'Must have python-magic and libmagic installed')
-    def test_unknown_extension_with_python_contents_results_in_python_mimetype(self):
-        name = 'test.thisisnotarealextensionidonotcarwhatyousay'
-        python_file = os.path.join(HERE, 'test_utils.py')
-        with open(python_file, 'r') as the_file:
-            content = the_file.read()
-        mimetype = get_mimetype(name, content)
-        assert_equal('text/x-python', mimetype)
+        assert_in('/fakeid/', url)
+        assert_in('/path', url)
+        assert_in('/providers/provider', url)
 
 
 class TestFrameworkUtils(unittest.TestCase):
@@ -349,26 +293,26 @@ class TestWebsiteUtils(unittest.TestCase):
             },
             'bat': ['man']
         }
-        outputs = util.rapply(inputs, str.upper)
+        outputs = rapply(inputs, str.upper)
         assert_equal(outputs['foo'], 'bar'.upper())
         assert_equal(outputs['baz']['boom'], ['kapow'.upper()])
         assert_equal(outputs['baz']['bang'], 'bam'.upper())
         assert_equal(outputs['bat'], ['man'.upper()])
 
         r_assert = lambda s: assert_equal(s.upper(), s)
-        util.rapply(outputs, r_assert)
+        rapply(outputs, r_assert)
 
     def test_rapply_on_list(self):
-        inputs = range(5)
+        inputs = list(range(5))
         add_one = lambda n: n + 1
-        outputs = util.rapply(inputs, add_one)
+        outputs = rapply(inputs, add_one)
         for i in inputs:
             assert_equal(outputs[i], i + 1)
 
     def test_rapply_on_tuple(self):
         inputs = tuple(i for i in range(5))
         add_one = lambda n: n + 1
-        outputs = util.rapply(inputs, add_one)
+        outputs = rapply(inputs, add_one)
         for i in inputs:
             assert_equal(outputs[i], i + 1)
         assert_equal(type(outputs), tuple)
@@ -376,17 +320,17 @@ class TestWebsiteUtils(unittest.TestCase):
     def test_rapply_on_set(self):
         inputs = set(i for i in range(5))
         add_one = lambda n: n + 1
-        outputs = util.rapply(inputs, add_one)
+        outputs = rapply(inputs, add_one)
         for i in inputs:
             assert_in(i + 1, outputs)
         assert_true(isinstance(outputs, set))
 
     def test_rapply_on_str(self):
-        input = "bob"
+        input = 'bob'
         convert = lambda s: s.upper()
-        outputs = util.rapply(input, convert)
+        outputs = rapply(input, convert)
 
-        assert_equal("BOB", outputs)
+        assert_equal('BOB', outputs)
         assert_true(isinstance(outputs, basestring))
 
     def test_rapply_preserves_args_and_kwargs(self):
@@ -394,10 +338,10 @@ class TestWebsiteUtils(unittest.TestCase):
             if check and checkFn(item):
                 return item
             return 0
-        inputs = range(5)
-        outputs = util.rapply(inputs, zero_if_not_check, True, checkFn=lambda n: n % 2)
+        inputs = list(range(5))
+        outputs = rapply(inputs, zero_if_not_check, True, checkFn=lambda n: n % 2)
         assert_equal(outputs, [0, 1, 0, 3, 0])
-        outputs = util.rapply(inputs, zero_if_not_check, False, checkFn=lambda n: n % 2)
+        outputs = rapply(inputs, zero_if_not_check, False, checkFn=lambda n: n % 2)
         assert_equal(outputs, [0, 0, 0, 0, 0])
 
 class TestProjectUtils(OsfTestCase):
@@ -434,13 +378,13 @@ class TestProfileUtils(DbTestCase):
     def setUp(self):
         self.user = UserFactory()
 
-    def test_get_other_user_gravatar_default_size(self):
-        gravitar = profile_utils.get_gravatar(self.user)
-        assert_true(gravitar)
+    def test_get_other_user_profile_image_default_size(self):
+        profile_image = profile_utils.get_profile_image_url(self.user)
+        assert_true(profile_image)
 
-    def test_get_other_user_gravatar_specific_size(self):
-        gravitar = profile_utils.get_gravatar(self.user, size=25)
-        assert_true(gravitar)
+    def test_get_other_user_profile_image(self):
+        profile_image = profile_utils.get_profile_image_url(self.user, size=25)
+        assert_true(profile_image)
 
 
 class TestSignalUtils(unittest.TestCase):
@@ -457,12 +401,6 @@ class TestSignalUtils(unittest.TestCase):
         self.signal_.connect(self.listener)
         self.signal_.send()
         assert_true(self.mock_listener.called)
-
-    def test_temporary_disconnect(self):
-        self.signal_.connect(self.listener)
-        with util.disconnected_from(self.signal_, self.listener):
-            self.signal_.send()
-        assert_false(self.mock_listener.called)
 
 
 class TestUserUtils(unittest.TestCase):
@@ -496,3 +434,22 @@ class TestUserUtils(unittest.TestCase):
         given_name = 'Cause'
         csl_given_name = generate_csl_given_name(given_name)
         assert_equal(csl_given_name, 'Cause')
+
+
+@pytest.mark.django_db
+class TestUserFactoryConflict:
+
+    def test_build_create_user_time_conflict(self):
+        # Test that build and create user factories do not create conflicting usernames
+        # because they occured quickly
+        user_email_one = fake_email()
+        user_email_two = fake_email()
+        assert user_email_one != user_email_two
+
+        user_one_build = UserFactory.build()
+        user_two_build = UserFactory.build()
+        assert user_one_build.username != user_two_build.username
+
+        user_one_create = UserFactory()
+        user_two_create = UserFactory()
+        assert user_one_create.username != user_two_create.username

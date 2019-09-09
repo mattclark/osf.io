@@ -2,20 +2,22 @@ import logging
 import random
 
 import bson
-import modularodm.exceptions
 from django.contrib.contenttypes.fields import (GenericForeignKey,
                                                 GenericRelation)
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import MultipleObjectsReturned
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import models
+from django.db import connections, models
 from django.db.models import ForeignKey
+from django.db.models.query import QuerySet
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from django_extensions.db.models import TimeStampedModel
 from include import IncludeQuerySet
+from six import string_types
+
 from osf.utils.caching import cached_property
 from osf.exceptions import ValidationError
-from osf.modm_compat import to_django_query
 from osf.utils.fields import LowercaseCharField, NonNaiveDateTimeField
 
 ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'
@@ -23,31 +25,42 @@ ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'
 logger = logging.getLogger(__name__)
 
 
+def _check_blacklist(guid):
+    return BlackListGuid.objects.filter(guid=guid).exists()
+
+
 def generate_guid(length=5):
     while True:
         guid_id = ''.join(random.sample(ALPHABET, length))
 
-        try:
-            # is the guid in the blacklist
-            BlackListGuid.objects.get(guid=guid_id)
-        except BlackListGuid.DoesNotExist:
-            # it's not, check and see if it's already in the database
-            try:
-                Guid.objects.get(_id=guid_id)
-            except Guid.DoesNotExist:
-                # valid and unique guid
-                return guid_id
+        # is the guid in the blacklist
+        if _check_blacklist(guid_id):
+            continue
+
+        # it's not, check and see if it's already in the database
+        if not Guid.objects.filter(_id=guid_id).exists():
+            return guid_id
 
 
 def generate_object_id():
     return str(bson.ObjectId())
 
 
-class BaseModel(models.Model):
-    """Base model that acts makes subclasses mostly compatible with the
-    modular-odm ``StoredObject`` interface.
-    """
+class QuerySetExplainMixin:
+    def explain(self, *args):
+        extra_arguments = ''
+        for item in args:
+            extra_arguments = '{} {}'.format(extra_arguments, item) if isinstance(item, string_types) else extra_arguments
+        cursor = connections[self.db].cursor()
+        query, params = self.query.sql_with_params()
+        cursor.execute('explain analyze verbose %s' % query, params)
+        return '\n'.join(r[0] for r in cursor.fetchall())
 
+
+QuerySet.__bases__ += (QuerySetExplainMixin,)
+
+
+class BaseModel(TimeStampedModel, QuerySetExplainMixin):
     migration_page_size = 50000
 
     objects = models.QuerySet.as_manager()
@@ -58,8 +71,8 @@ class BaseModel(models.Model):
     def __unicode__(self):
         return '{}'.format(self.id)
 
-    def to_storage(self):
-        local_django_fields = set([x.name for x in self._meta.concrete_fields])
+    def to_storage(self, include_auto_now=True):
+        local_django_fields = set([x.name for x in self._meta.concrete_fields if include_auto_now or not getattr(x, 'auto_now', False)])
         return {name: self.serializable_value(name) for name in local_django_fields}
 
     @classmethod
@@ -84,33 +97,6 @@ class BaseModel(models.Model):
         except cls.DoesNotExist:
             return None
 
-    @classmethod
-    def find_one(cls, query, select_for_update=False):
-        try:
-            if select_for_update:
-                return cls.objects.filter(to_django_query(query, model_cls=cls)).select_for_update().get()
-            return cls.objects.get(to_django_query(query, model_cls=cls))
-        except cls.DoesNotExist:
-            raise modularodm.exceptions.NoResultsFound()
-        except cls.MultipleObjectsReturned as e:
-            raise modularodm.exceptions.MultipleResultsFound(*e.args)
-
-    @classmethod
-    def find(cls, query=None):
-        if not query:
-            return cls.objects.all()
-        else:
-            return cls.objects.filter(to_django_query(query, model_cls=cls))
-
-    @classmethod
-    def remove(cls, query=None):
-        return cls.find(query).delete()
-
-    @classmethod
-    def remove_one(cls, obj):
-        if obj.pk:
-            return obj.delete()
-
     @property
     def _primary_name(self):
         return '_id'
@@ -122,10 +108,10 @@ class BaseModel(models.Model):
     def reload(self):
         return self.refresh_from_db()
 
-    def refresh_from_db(self):
-        super(BaseModel, self).refresh_from_db()
+    def refresh_from_db(self, **kwargs):
+        super(BaseModel, self).refresh_from_db(**kwargs)
         # Django's refresh_from_db does not uncache GFKs
-        for field in self._meta.virtual_fields:
+        for field in self._meta.private_fields:
             if hasattr(field, 'cache_attr') and field.cache_attr in self.__dict__:
                 del self.__dict__[field.cache_attr]
 
@@ -147,7 +133,7 @@ class BaseModel(models.Model):
 
     def save(self, *args, **kwargs):
         # Make Django validate on save (like modm)
-        if not kwargs.get('force_insert') and not kwargs.get('force_update'):
+        if kwargs.pop('clean', True) and not (kwargs.get('force_insert') or kwargs.get('force_update')):
             try:
                 self.full_clean()
             except DjangoValidationError as err:
@@ -167,7 +153,7 @@ class Guid(BaseModel):
     _id = LowercaseCharField(max_length=255, null=False, blank=False, default=generate_guid, db_index=True,
                            unique=True)
     referent = GenericForeignKey()
-    content_type = models.ForeignKey(ContentType, null=True, blank=True)
+    content_type = models.ForeignKey(ContentType, null=True, blank=True, on_delete=models.CASCADE)
     object_id = models.PositiveIntegerField(null=True, blank=True)
     created = NonNaiveDateTimeField(db_index=True, auto_now_add=True)
 
@@ -238,6 +224,26 @@ class ObjectIDMixin(BaseIDMixin):
         abstract = True
 
 
+class TypedObjectIDMixin(ObjectIDMixin):
+    class Meta:
+        abstract = True
+        # On subclasses, be sure to add a unique_together constraint on '_id' and 'type'
+
+    _id = models.CharField(max_length=24, default=generate_object_id, db_index=True)
+
+    @classmethod
+    def load(cls, q, select_for_update=False):
+        try:
+            return cls.objects.get(_id=q, type=cls._typedmodels_type) if not select_for_update else cls.objects.filter(_id=q, type=cls._typedmodels_type).select_for_update().get()
+        except cls.DoesNotExist:
+            # modm doesn't throw exceptions when loading things that don't exist
+            return None
+        except AttributeError as e:
+            # load has been called on an Abstract typed class
+            e.message = '"load" must be called on a typed class, got {}'.format(cls.__name__)
+            raise
+
+
 class InvalidGuid(Exception):
     pass
 
@@ -282,6 +288,8 @@ class GuidMixinQuerySet(IncludeQuerySet):
         return super(GuidMixinQuerySet, self)._filter_or_exclude(negate, *args, **kwargs).include('guids')
 
     def all(self):
+        if self._fields:
+            return super(GuidMixinQuerySet, self).all()
         return super(GuidMixinQuerySet, self).all().include('guids')
 
     def count(self):
@@ -303,7 +311,7 @@ class GuidMixin(BaseIDMixin):
     @cached_property
     def _id(self):
         try:
-            guid = self.guids.all()[0]
+            guid = self.guids.first()
         except IndexError:
             return None
         if guid:
@@ -335,8 +343,8 @@ class GuidMixin(BaseIDMixin):
         try:
             # guids___id__isnull=False forces an INNER JOIN
             if select_for_update:
-                return cls.objects.filter(guids___id__isnull=False, guids___id=q).select_for_update().first()
-            return cls.objects.filter(guids___id__isnull=False, guids___id=q).first()
+                return cls.objects.filter(guids___id__isnull=False, guids___id=q).select_for_update()[:1].get()
+            return cls.objects.filter(guids___id__isnull=False, guids___id=q)[:1].get()
         except cls.DoesNotExist:
             return None
 

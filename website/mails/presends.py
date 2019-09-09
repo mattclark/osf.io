@@ -4,7 +4,7 @@ from django.utils import timezone
 from website import settings
 
 def no_addon(email):
-    return len(email.user.get_addons()) == 0
+    return len([addon for addon in email.user.get_addons() if addon.config.short_name != 'osfstorage']) == 0
 
 def no_login(email):
     from osf.models.queued_mail import QueuedMail, NO_LOGIN_TYPE
@@ -31,6 +31,7 @@ def new_public_project(email):
         return False
     public = email.find_sent_of_same_type_and_user()
     return node.is_public and not len(public)
+
 
 def welcome_osf4m(email):
     """ presend has two functions. First is to make sure that the user has not

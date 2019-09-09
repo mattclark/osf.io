@@ -1,16 +1,22 @@
 # Ported from tests.test_mails
 import datetime as dt
 
+
 import pytest
 import mock
 from django.utils import timezone
+from waffle.testutils import override_switch
+from website.prereg.utils import get_prereg_schema
 
-from .factories import UserFactory, NodeFactory
+from .factories import UserFactory, NodeFactory, DraftRegistrationFactory
 
+from osf.features import DISABLE_ENGAGEMENT_EMAILS
 from osf.models.queued_mail import (
     queue_mail, WELCOME_OSF4M,
     NO_LOGIN, NO_ADDON, NEW_PUBLIC_PROJECT
 )
+from website.mails import mails
+from website.settings import DOMAIN
 
 @pytest.fixture()
 def user():
@@ -19,13 +25,17 @@ def user():
 @pytest.mark.django_db
 class TestQueuedMail:
 
+    @pytest.fixture()
+    def prereg(self, user):
+        return DraftRegistrationFactory(initiator=user, registration_schema=get_prereg_schema())
+
     def queue_mail(self, mail, user, send_at=None, **kwargs):
         mail = queue_mail(
-            to_addr=user.username if user else self.user.username,
+            to_addr=user.username if user else user.username,
             send_at=send_at or timezone.now(),
             user=user,
             mail=mail,
-            fullname=user.fullname if user else self.user.username,
+            fullname=user.fullname if user else user.username,
             **kwargs
         )
         return mail
@@ -79,7 +89,8 @@ class TestQueuedMail:
             mail=WELCOME_OSF4M,
             user=user,
             conference='Buttjamz conference',
-            fid=''
+            fid='',
+            domain=DOMAIN
         )
         assert bool(mail.send_mail()) is True
         assert mail.data['downloads'] == 0
@@ -149,3 +160,15 @@ class TestQueuedMail:
             mail=NO_ADDON,
         )
         assert mail.send_mail() is False
+
+    def test_disabled_queued_emails_not_sent_if_switch_active(self, user):
+        with override_switch(DISABLE_ENGAGEMENT_EMAILS, active=True):
+            assert self.queue_mail(mail=NO_ADDON, user=user) is False
+            assert self.queue_mail(mail=NO_LOGIN, user=user) is False
+            assert self.queue_mail(mail=WELCOME_OSF4M, user=user) is False
+            assert self.queue_mail(mail=NEW_PUBLIC_PROJECT, user=user) is False
+
+    def test_disabled_triggered_emails_not_sent_if_switch_active(self):
+        with override_switch(DISABLE_ENGAGEMENT_EMAILS, active=True):
+            assert mails.send_mail(to_addr='', mail=mails.WELCOME) is False
+            assert mails.send_mail(to_addr='', mail=mails.WELCOME_OSF4I) is False

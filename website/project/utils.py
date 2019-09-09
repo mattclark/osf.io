@@ -14,12 +14,6 @@ def serialize_node(*args, **kwargs):
     from website.project.views.node import _view_project
     return _view_project(*args, **kwargs)  # Not recommended practice
 
-PROJECT_QUERY = (
-    # Can encompass accessible projects, registrations, or forks
-    # Note: is_bookmark collection(s) are implicitly assumed to also be collections; that flag intentionally omitted
-    Q(is_deleted=False) & ~Q(type='osf.collection') & ~Q(type='osf.quickfilesnode')
-)
-
 def recent_public_registrations(n=10):
     Registration = apps.get_model('osf.Registration')
 
@@ -100,7 +94,7 @@ def activity():
                 break
 
     # New and Noteworthy projects are updated manually
-    new_and_noteworthy_projects = list(Node.objects.get(guids___id=settings.NEW_AND_NOTEWORTHY_LINKS_NODE).nodes_pointer)
+    new_and_noteworthy_projects = list(Node.objects.get(guids___id=settings.NEW_AND_NOTEWORTHY_LINKS_NODE, guids___id__isnull=False).nodes_pointer)
 
     return {
         'new_and_noteworthy_projects': new_and_noteworthy_projects,
@@ -108,3 +102,12 @@ def activity():
         'popular_public_projects': popular_public_projects,
         'popular_public_registrations': popular_public_registrations
     }
+
+
+# Credit to https://gist.github.com/cizixs/be41bbede49a772791c08491801c396f
+def sizeof_fmt(num, suffix='B'):
+    for unit in ['', 'K', 'M', 'G', 'T', 'P', 'E', 'Z']:
+        if abs(num) < 1000.0:
+            return '%3.1f%s%s' % (num, unit, suffix)
+        num /= 1000.0
+    return '%.1f%s%s' % (num, 'Y', suffix)

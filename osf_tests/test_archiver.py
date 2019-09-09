@@ -1,54 +1,45 @@
 #-*- coding: utf-8 -*-
+import re
 import copy
 import datetime
 import functools
-import json
-import logging
 import random
-import re
 from contextlib import nested
 
-import celery
-import httpretty
+import responses
 import mock  # noqa
 from django.utils import timezone
 from django.db import IntegrityError
 from mock import call
 import pytest
-from nose.tools import *  # flake8: noqa
-
-from scripts.stuck_registration_audit import find_failed_registrations
+from nose.tools import *  # noqa: F403
 
 from framework.auth import Auth
 from framework.celery_tasks import handlers
 
 from website.archiver import (
     ARCHIVER_INITIATED,
-    ARCHIVER_SUCCESS,
-    ARCHIVER_FAILURE,
-    ARCHIVER_NETWORK_ERROR,
-    ARCHIVER_SIZE_EXCEEDED,
-    NO_ARCHIVE_LIMIT,
 )
 from website.archiver import utils as archiver_utils
-from website.archiver.tasks import ArchivedFileNotFound
-from website.app import *  # noqa
+from website.app import *  # noqa: F403
 from website.archiver import listeners
-from website.archiver.tasks import *   # noqa
+from website.archiver.tasks import *   # noqa: F403
 from osf.models.archive import ArchiveTarget, ArchiveJob
 from website.archiver.decorators import fail_archive_on_error
 
 from website import mails
 from website import settings
-from website.util import waterbutler_url_for
-from website.util.sanitize import strip_html
-from osf.models import MetaSchema
+from osf.models import RegistrationSchema, Registration
+from osf.utils.sanitize import strip_html
 from addons.base.models import BaseStorageAddon
+from api.base.utils import waterbutler_api_url_for
 
 from osf_tests import factories
 from tests.base import OsfTestCase, fake
 from tests import utils as test_utils
 from tests.utils import unique as _unique
+
+pytestmark = pytest.mark.django_db
 
 SILENT_LOGGERS = (
     'framework.celery_tasks.utils',
@@ -124,6 +115,7 @@ FILE_TREE = {
     'path': '/',
     'name': '',
     'kind': 'folder',
+    'size': '100',
     'children': [
         {
             'path': '/1234567',
@@ -146,6 +138,43 @@ FILE_TREE = {
         }
     ],
 }
+
+WB_FILE_TREE = {
+    'attributes': {
+        'path': '/',
+        'name': '',
+        'kind': 'folder',
+        'size': '100',
+        'children': [
+            {
+                'attributes': {
+                    'path': '/1234567',
+                    'name': 'Afile.file',
+                    'kind': 'file',
+                    'size': '128',
+                }
+            },
+            {
+                'attributes': {
+                    'path': '/qwerty',
+                    'name': 'A Folder',
+                    'kind': 'folder',
+                    'children': [
+                        {
+                            'attributes': {
+                                'path': '/qwerty/asdfgh',
+                                'name': 'coolphoto.png',
+                                'kind': 'file',
+                                'size': '256',
+                            }
+                        }
+                    ],
+                }
+            }
+        ],
+    }
+}
+
 
 class MockAddon(object):
 
@@ -240,6 +269,7 @@ def generate_schema_from_data(data):
                 'id': id,
                 'type': 'osf-upload' if prop.get('extra') else 'string'
             }
+
     def from_question(qid, question):
         if q.get('extra'):
             return {
@@ -274,7 +304,7 @@ def generate_schema_from_data(data):
             ]
         }]
     }
-    schema = MetaSchema(
+    schema = RegistrationSchema(
         name=_schema['name'],
         schema_version=_schema['version'],
         schema=_schema
@@ -287,10 +317,7 @@ def generate_schema_from_data(data):
         # reason. Update the doc currently in the db rather than saving a new
         # one.
 
-        schema = MetaSchema.find_one(
-            Q('name', 'eq', _schema['name']) &
-            Q('schema_version', 'eq', _schema['version'])
-        )
+        schema = RegistrationSchema.objects.get(name=_schema['name'], schema_version=_schema['version'])
         schema.schema = _schema
         schema.save()
 
@@ -360,50 +387,65 @@ class ArchiverTestCase(OsfTestCase):
         self.archive_job = self.dst.archive_job
 
 class TestStorageAddonBase(ArchiverTestCase):
+    tree_root = WB_FILE_TREE['attributes']['children']
+    tree_child = tree_root[0]
+    tree_grandchild = tree_root[1]['attributes']['children']
+    tree_great_grandchild = tree_grandchild[0]
 
-    RESP_MAP = {
-        '/': dict(data=FILE_TREE['children']),
-        '/1234567': dict(data=FILE_TREE['children'][0]),
-        '/qwerty': dict(data=FILE_TREE['children'][1]['children']),
-        '/qwerty/asdfgh': dict(data=FILE_TREE['children'][1]['children'][0]),
-    }
+    URLS = ['/', '/1234567', '/qwerty', '/qwerty/asdfgh']
 
-    @httpretty.activate
+    def get_resp(self, url):
+        if '/qwerty/asdfgh' in url:
+            return dict(data=self.tree_great_grandchild)
+        if '/qwerty' in url:
+            return dict(data=self.tree_grandchild)
+        if '/1234567' in url:
+            return dict(data=self.tree_child)
+        return dict(data=self.tree_root)
+
+    @responses.activate
     def _test__get_file_tree(self, addon_short_name):
-        requests_made = []
-        def callback(request, uri, headers):
-            path = request.querystring['path'][0]
-            requests_made.append(path)
-            return (200, headers, json.dumps(self.RESP_MAP[path]))
-
-        for path in self.RESP_MAP.keys():
-            url = waterbutler_url_for(
-                'metadata',
-                provider=addon_short_name,
+        for path in self.URLS:
+            url = waterbutler_api_url_for(
+                self.src._id,
+                addon_short_name,
+                meta=True,
                 path=path,
-                node=self.src,
                 user=self.user,
                 view_only=True,
                 _internal=True,
+                base_url=self.src.osfstorage_region.waterbutler_url
             )
-            httpretty.register_uri(httpretty.GET,
-                                   url,
-                                   body=callback,
-                                   content_type='applcation/json')
+            responses.add(
+                responses.Response(
+                    responses.GET,
+                    url,
+                    json=self.get_resp(url),
+                    content_type='applcation/json'
+                )
+            )
         addon = self.src.get_or_add_addon(addon_short_name, auth=self.auth)
         root = {
             'path': '/',
             'name': '',
             'kind': 'folder',
+            # Regression test for OSF-8696 confirming that size attr does not stop folders from recursing
+            'size': '100',
         }
         file_tree = addon._get_file_tree(root, self.user)
         assert_equal(FILE_TREE, file_tree)
-        assert_equal(requests_made, ['/', '/qwerty'])  # no requests made for files
+        assert_equal(len(responses.calls), 2)
+
+        # Makes a request for folders ('/qwerty') but not files ('/1234567', '/qwerty/asdfgh')
+        requests_made_urls = [call.request.url for call in responses.calls]
+        assert_true(any('/qwerty' in url for url in requests_made_urls))
+        assert_false(any('/1234567' in url for url in requests_made_urls))
+        assert_false(any('/qwerty/asdfgh' in url for url in requests_made_urls))
 
     def _test_addon(self, addon_short_name):
         self._test__get_file_tree(addon_short_name)
 
-    @pytest.mark.skip('Unskip when figshare addon is implemented')
+    # @pytest.mark.skip('Unskip when figshare addon is implemented')
     def test_addons(self):
         #  Test that each addon in settings.ADDONS_ARCHIVABLE other than wiki/forward implements the StorageAddonBase interface
         for addon in [a for a in settings.ADDONS_ARCHIVABLE if a not in ['wiki', 'forward']]:
@@ -447,8 +489,7 @@ class TestArchiverTasks(ArchiverTestCase):
             archive_node(results, self.archive_job._id)
         archive_osfstorage_signature = archive_addon.si(
             'osfstorage',
-            self.archive_job._id,
-            results
+            self.archive_job._id
         )
         assert(mock_group.called_with(archive_osfstorage_signature))
 
@@ -456,18 +497,15 @@ class TestArchiverTasks(ArchiverTestCase):
     def test_archive_node_fail(self):
         settings.MAX_ARCHIVE_SIZE = 100
         results = [stat_addon(addon, self.archive_job._id) for addon in ['osfstorage', 'dropbox']]
-        with mock.patch('website.archiver.tasks.ArchiverTask.on_failure') as mock_fail:
-            try:
-                archive_node.apply(args=(results, self.archive_job._id))
-            except:
-                pass
-        assert_true(isinstance(mock_fail.call_args[0][0], ArchiverSizeExceeded))
+        with pytest.raises(ArchiverSizeExceeded):  # Note: Requires task_eager_propagates = True in celery
+            archive_node.apply(args=(results, self.archive_job._id))
 
     @mock.patch('website.project.signals.archive_callback.send')
     @mock.patch('website.archiver.tasks.archive_addon.delay')
     def test_archive_node_does_not_archive_empty_addons(self, mock_archive_addon, mock_send):
         with mock.patch('osf.models.mixins.AddonModelMixin.get_addon') as mock_get_addon:
             mock_addon = MockAddon()
+
             def empty_file_tree(user, version):
                 return {
                     'path': '/',
@@ -495,15 +533,13 @@ class TestArchiverTasks(ArchiverTestCase):
             archive_node(results, self.archive_job._id)
         archive_dropbox_signature = archive_addon.si(
             'dropbox',
-            self.archive_job._id,
-            results
+            self.archive_job._id
         )
         assert(mock_group.called_with(archive_dropbox_signature))
 
     @mock.patch('website.archiver.tasks.make_copy_request.delay')
     def test_archive_addon(self, mock_make_copy_request):
-        result = archiver_utils.aggregate_file_tree_metadata('osfstorage', FILE_TREE, self.user)
-        archive_addon('osfstorage', self.archive_job._id, result)
+        archive_addon('osfstorage', self.archive_job._id)
         assert_equal(self.archive_job.get_target('osfstorage').status, ARCHIVER_INITIATED)
         cookie = self.user.get_or_create_cookie()
         assert(mock_make_copy_request.called_with(
@@ -577,7 +613,7 @@ class TestArchiverTasks(ArchiverTestCase):
             }
         }
         schema = generate_schema_from_data(data)
-        draft = factories.DraftRegistrationFactory(branched_from=node, registration_schema=schema, registered_metadata=data)
+        factories.DraftRegistrationFactory(branched_from=node, registration_schema=schema, registered_metadata=data)
 
         with test_utils.mock_archive(node, schema=schema, data=data, autocomplete=True, autoapprove=True) as registration:
             with mock.patch.object(BaseStorageAddon, '_get_file_tree', mock.Mock(return_value=file_tree)):
@@ -784,6 +820,7 @@ class TestArchiverUtils(ArchiverTestCase):
 
     @mock.patch('website.mails.send_mail')
     def test_handle_archive_fail_copy(self, mock_send_mail):
+        url = settings.INTERNAL_DOMAIN + self.src._id
         archiver_utils.handle_archive_fail(
             ARCHIVER_NETWORK_ERROR,
             self.src,
@@ -801,11 +838,13 @@ class TestArchiverUtils(ArchiverTestCase):
             mimetype='html',
         )
         args_desk = dict(
-            to_addr=settings.SUPPORT_EMAIL,
+            to_addr=settings.OSF_SUPPORT_EMAIL,
             user=self.user,
             src=self.src,
             mail=mails.ARCHIVE_COPY_ERROR_DESK,
             results={},
+            can_change_preferences=False,
+            url=url,
         )
         mock_send_mail.assert_has_calls([
             call(**args_user),
@@ -814,6 +853,7 @@ class TestArchiverUtils(ArchiverTestCase):
 
     @mock.patch('website.mails.send_mail')
     def test_handle_archive_fail_size(self, mock_send_mail):
+        url = settings.INTERNAL_DOMAIN + self.src._id
         archiver_utils.handle_archive_fail(
             ARCHIVER_SIZE_EXCEEDED,
             self.src,
@@ -830,13 +870,14 @@ class TestArchiverUtils(ArchiverTestCase):
             mimetype='html',
         )
         args_desk = dict(
-            to_addr=settings.SUPPORT_EMAIL,
+            to_addr=settings.OSF_SUPPORT_EMAIL,
             user=self.user,
             src=self.src,
             mail=mails.ARCHIVE_SIZE_EXCEEDED_DESK,
             stat_result={},
+            can_change_preferences=False,
+            url=url,
         )
-
         mock_send_mail.assert_has_calls([
             call(**args_user),
             call(**args_desk),
@@ -1016,7 +1057,13 @@ class TestArchiverListeners(ArchiverTestCase):
         self.dst.archive_job.save()
         with mock.patch('website.archiver.utils.handle_archive_fail') as mock_fail:
             listeners.archive_callback(self.dst)
-        mock_fail.assert_called_with(ARCHIVER_UNCAUGHT_ERROR, self.src, self.dst, self.user, self.dst.archive_job.target_addons)
+        call_args = mock_fail.call_args[0]
+        assert call_args[0] == ARCHIVER_UNCAUGHT_ERROR
+        assert call_args[1] == self.src
+        assert call_args[2] == self.dst
+        assert call_args[3] == self.user
+        assert call_args[3] == self.user
+        assert list(call_args[4]) == list(self.dst.archive_job.target_addons.all())
 
     def test_archive_callback_updates_archiving_state_when_done(self):
         proj = factories.NodeFactory()
@@ -1064,6 +1111,22 @@ class TestArchiverListeners(ArchiverTestCase):
         for node in [reg, rchild, rchild2]:
             assert_false(node.archive_job.archive_tree_finished())
 
+    def test_archive_tree_finished_false_for_partial_archive(self):
+        proj = factories.NodeFactory()
+        factories.NodeFactory(parent=proj, title='child')
+        factories.NodeFactory(parent=proj, title='sibling')
+
+        reg = factories.RegistrationFactory(project=proj)
+        rchild = reg._nodes.filter(title='child').get()
+        rsibling = reg._nodes.filter(title='sibling').get()
+        for node in [reg, rchild, rsibling]:
+            node.archive_job._set_target('osfstorage')
+        for node in [reg, rchild]:
+            node.archive_job.update_target('osfstorage', ARCHIVER_SUCCESS)
+        rsibling.archive_job.update_target('osfstorage', ARCHIVER_INITIATED)
+        rsibling.save()
+        assert_false(reg.archive_job.archive_tree_finished())
+
     @mock.patch('website.mails.send_mail')
     @mock.patch('website.archiver.tasks.archive_success.delay')
     def test_archive_callback_on_tree_sends_only_one_email(self, mock_send_success, mock_arhive_success):
@@ -1103,7 +1166,7 @@ class TestArchiverScripts(ArchiverTestCase):
             archive_job.datetime_initiated = timezone.now() - delta
             archive_job.save()
             reg.save()
-            ArchiveJob.remove_one(archive_job)
+            ArchiveJob.delete(archive_job)
             legacy.append(reg._id)
         for i in range(5):
             reg = factories.RegistrationFactory()
@@ -1126,7 +1189,7 @@ class TestArchiverScripts(ArchiverTestCase):
             archive_job.update_target('osfstorage', ARCHIVER_INITIATED)
             archive_job.save()
             pending.append(reg)
-        failed = find_failed_registrations()
+        failed = Registration.find_failed_registrations()
         assert_equal(len(failed), 5)
         assert_items_equal([f._id for f in failed], failures)
         for pk in legacy:
@@ -1138,6 +1201,7 @@ class TestArchiverDecorators(ArchiverTestCase):
     @mock.patch('website.archiver.signals.archive_fail.send')
     def test_fail_archive_on_error(self, mock_fail):
         e = HTTPError(418)
+
         def error(*args, **kwargs):
             raise e
 
@@ -1171,6 +1235,7 @@ class TestArchiverBehavior(OsfTestCase):
             listeners.archive_callback(reg)
         assert_equal(mock_update_search.call_count, 1)
 
+    @pytest.mark.enable_search
     @mock.patch('website.search.elastic_search.delete_doc')
     @mock.patch('website.mails.send_mail')
     def test_archiving_nodes_not_added_to_search_on_archive_failure(self, mock_send, mock_delete_index_node):
@@ -1275,3 +1340,17 @@ class TestArchiveJobModel(OsfTestCase):
                 node.archive_job.update_target(target.name, ARCHIVER_SUCCESS)
         for node in reg.node_and_primary_descendants():
             assert_true(node.archive_job.archive_tree_finished())
+
+# Regression test for https://openscience.atlassian.net/browse/OSF-9085
+def test_archiver_uncaught_error_mail_renders():
+    src = factories.ProjectFactory()
+    user = src.creator
+    job = factories.ArchiveJobFactory()
+    mail = mails.ARCHIVE_UNCAUGHT_ERROR_DESK
+    assert mail.html(
+        user=user,
+        src=src,
+        results=job.target_addons.all(),
+        url=settings.INTERNAL_DOMAIN + src._id,
+        can_change_preferences=False,
+    )

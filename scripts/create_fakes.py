@@ -44,13 +44,10 @@ import django
 import pytz
 from faker import Factory
 from faker.providers import BaseProvider
-from modularodm.exceptions import NoResultsFound
-from modularodm.query.querydialect import DefaultQueryDialect as Q
 django.setup()
 
 from framework.auth import Auth
-from framework.auth import utils
-from osf_tests.factories import UserFactory, ProjectFactory, NodeFactory, RegistrationFactory, PreprintFactory, PreprintProviderFactory
+from osf_tests.factories import UserFactory, ProjectFactory, NodeFactory, RegistrationFactory, PreprintFactory, PreprintProviderFactory, fake_email
 from osf import models
 from website.app import init_app
 
@@ -172,7 +169,7 @@ class Sciencer(BaseProvider):
         words = cls.science_words(nb_words)
         words[0] = words[0].title()
 
-        return " ".join(words) + '.'
+        return ' '.join(words) + '.'
 
     def science_sentences(cls, nb=3):
         """
@@ -198,7 +195,7 @@ class Sciencer(BaseProvider):
         if variable_nb_sentences:
             nb_sentences = cls.randomize_nb_elements(nb_sentences)
 
-        return " ".join(cls.science_sentences(nb_sentences))
+        return ' '.join(cls.science_sentences(nb_sentences))
 
     def science_paragraphs(cls, nb=3):
         """
@@ -255,7 +252,7 @@ class Sciencer(BaseProvider):
                     size += len(paragraph)
                 text.pop()
 
-        return "".join(text)
+        return ''.join(text)
 
 
 logger = logging.getLogger('create_fakes')
@@ -270,12 +267,11 @@ fake.add_provider(Sciencer)
 
 
 def create_fake_user():
-    email = fake.email()
+    email = fake_email()
     name = fake.name()
     user = UserFactory(username=email, fullname=name,
-                       is_registered=True, is_claimed=True,
+                       is_registered=True, emails=[email],
                        date_registered=fake.date_time(tzinfo=pytz.UTC),
-                       emails=[email]
                    )
     user.set_password('faker123')
     user.save()
@@ -289,7 +285,7 @@ def parse_args():
     parser.add_argument('--nusers', dest='n_users', type=int, default=3)
     parser.add_argument('--nprojects', dest='n_projects', type=int, default=3)
     parser.add_argument('-c', '--components', dest='n_components', type=evaluate_argument, default='0')
-    parser.add_argument('-p', '--privacy', dest="privacy", type=str, default='private', choices=['public', 'private'])
+    parser.add_argument('-p', '--privacy', dest='privacy', type=str, default='private', choices=['public', 'private'])
     parser.add_argument('-n', '--name', dest='name', type=str, default=None)
     parser.add_argument('-t', '--tags', dest='n_tags', type=int, default=5)
     parser.add_argument('--presentation', dest='presentation_name', type=str, default=None)
@@ -309,14 +305,14 @@ def create_fake_project(creator, n_users, privacy, n_components, name, n_tags, p
         provider = None
         if preprint_provider:
             try:
-                provider = models.PreprintProvider.find_one(Q('_id', 'eq', provider))
-            except NoResultsFound:
+                provider = models.PreprintProvider.objects.get(_id=provider)
+            except models.PreprintProvider.DoesNotExist:
                 pass
         if not provider:
             provider = PreprintProviderFactory(name=fake.science_word())
         privacy = 'public'
-        mock_change_identifier = mock.patch('website.identifiers.client.EzidClient.change_status_identifier')
-        mock_change_identifier.start()
+        mock_change_identifier_preprints = mock.patch('website.identifiers.client.CrossRefClient.update_identifier')
+        mock_change_identifier_preprints.start()
         project = PreprintFactory(title=project_title, description=fake.science_paragraph(), creator=creator, provider=provider)
         node = project.node
     elif is_registration:
@@ -350,7 +346,7 @@ def create_fake_project(creator, n_users, privacy, n_components, name, n_tags, p
 
 def render_generations_from_parent(parent, creator, num_generations):
     current_gen = parent
-    for generation in xrange(0, num_generations):
+    for generation in range(0, num_generations):
         next_gen = NodeFactory(
             parent=current_gen,
             creator=creator,
@@ -373,7 +369,7 @@ def render_generations_from_node_structure_list(parent, creator, node_structure_
 
 def main():
     args = parse_args()
-    creator = models.OSFUser.find(Q('username', 'eq', args.user))[0]
+    creator = models.OSFUser.objects.get(username=args.user)
     for i in range(args.n_projects):
         name = args.name + str(i) if args.name else ''
         create_fake_project(creator, args.n_users, args.privacy, args.n_components, name, args.n_tags,

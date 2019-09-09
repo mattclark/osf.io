@@ -5,8 +5,9 @@ import json
 import unittest
 import mock
 
+import pytest
 from django.core.exceptions import ValidationError
-from nose.tools import *  # flake8: noqa (PEP8 asserts)
+from nose.tools import *  # noqa: F403 (PEP8 asserts)
 
 from framework.auth import Auth
 from osf_tests.factories import (AuthUserFactory, NodeLicenseRecordFactory,
@@ -17,7 +18,7 @@ from tests.utils import assert_logs, assert_not_logs
 from website import settings
 from osf.models.licenses import NodeLicense, serialize_node_license_record, serialize_node_license
 from osf.models import NodeLog
-from website.exceptions import NodeStateError
+from osf.exceptions import NodeStateError
 
 
 
@@ -77,20 +78,21 @@ class TestNodeLicenses(OsfTestCase):
         for prop in ('license_id', 'name', 'node_license'):
             assert_equal(getattr(record, prop), getattr(copied, prop))
 
+    @pytest.mark.enable_implicit_clean
     def test_license_uniqueness_on_id_is_enforced_in_the_database(self):
         NodeLicense(license_id='foo', name='bar', text='baz').save()
         assert_raises(ValidationError, NodeLicense(license_id='foo', name='buz', text='boo').save)
 
     def test_ensure_licenses_updates_existing_licenses(self):
-        assert_equal(ensure_licenses(), (0, 16))
+        assert_equal(ensure_licenses(), (0, 18))
 
     def test_ensure_licenses_no_licenses(self):
-        before_count = NodeLicense.find().count()
-        NodeLicense.remove()
-        assert_false(NodeLicense.find().count())
+        before_count = NodeLicense.objects.all().count()
+        NodeLicense.objects.all().delete()
+        assert_false(NodeLicense.objects.all().count())
 
         ensure_licenses()
-        assert_equal(before_count, NodeLicense.find().count())
+        assert_equal(before_count, NodeLicense.objects.all().count())
 
     def test_ensure_licenses_some_missing(self):
         NodeLicense.objects.get(license_id='LGPL3').delete()

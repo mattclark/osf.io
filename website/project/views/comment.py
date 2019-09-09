@@ -19,7 +19,7 @@ from website.project.signals import comment_added, mention_added
 
 
 @file_updated.connect
-def update_file_guid_referent(self, node, event_type, payload, user=None):
+def update_file_guid_referent(self, target, event_type, payload, user=None):
     if event_type not in ('addon_file_moved', 'addon_file_renamed'):
         return  # Nothing to do
 
@@ -37,7 +37,7 @@ def update_file_guid_referent(self, node, event_type, payload, user=None):
     file_guids = BaseFileNode.resolve_class(source['provider'], BaseFileNode.ANY).get_file_guids(
         materialized_path=source['materialized'] if source['provider'] != 'osfstorage' else source['path'],
         provider=source['provider'],
-        node=source_node
+        target=source_node
     )
 
     for guid in file_guids:
@@ -117,7 +117,7 @@ def send_comment_added_notification(comment, auth, new_mentions=None):
     target = comment.target
 
     context = dict(
-        gravatar_url=auth.user.profile_image_url(),
+        profile_image_url=auth.user.profile_image_url(),
         content=render_email_markdown(comment.content),
         page_type=comment.get_comment_page_type(),
         page_title=comment.get_comment_page_title(),
@@ -153,7 +153,7 @@ def send_mention_added_notification(comment, new_mentions, auth):
     target = comment.target
 
     context = dict(
-        gravatar_url=auth.user.profile_image_url(),
+        profile_image_url=auth.user.profile_image_url(),
         content=render_email_markdown(comment.content),
         page_type='file' if comment.page == Comment.FILES else node.project_or_component,
         page_title=comment.root_target.referent.name if comment.page == Comment.FILES else '',
@@ -178,12 +178,14 @@ def is_reply(target):
 
 
 def _update_comments_timestamp(auth, node, page=Comment.OVERVIEW, root_id=None):
-    if node.is_contributor(auth.user):
+    if node.is_contributor_or_group_member(auth.user):
         enqueue_postcommit_task(ban_url, (node, ), {}, celery=False, once_per_request=True)
         if root_id is not None:
             guid_obj = Guid.load(root_id)
             if guid_obj is not None:
-                enqueue_postcommit_task(ban_url, (guid_obj.referent, ), {}, celery=False, once_per_request=True)
+                # FIXME: Doesn't work because we're not using Vanish anymore
+                # enqueue_postcommit_task(ban_url, (self.get_node(),), {}, celery=False, once_per_request=True)
+                pass
 
         # update node timestamp
         if page == Comment.OVERVIEW:

@@ -2,12 +2,13 @@
 # encoding: utf-8
 from django.apps import apps
 from django.utils import timezone
-from factory import SubFactory, post_generation
+from factory import SubFactory, post_generation, Sequence
 from factory.django import DjangoModelFactory
 
 from osf_tests.factories import AuthUserFactory
 
 from osf import models
+from addons.osfstorage.models import Region
 
 
 settings = apps.get_app_config('addons_osfstorage')
@@ -25,7 +26,7 @@ class FileVersionFactory(DjangoModelFactory):
         model = models.FileVersion
 
     creator = SubFactory(AuthUserFactory)
-    date_modified = timezone.now()
+    modified = timezone.now()
     location = generic_location
     identifier = 0
 

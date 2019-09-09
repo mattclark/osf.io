@@ -1,3 +1,4 @@
+from django.db.models import F
 from rest_framework import generics
 from rest_framework import permissions as drf_permissions
 from rest_framework import exceptions
@@ -6,8 +7,8 @@ from rest_framework.response import Response
 
 from framework.auth.oauth_scopes import CoreScopes
 
-from osf.models import OSFUser, Node, Institution
-from website.util import permissions as osf_permissions
+from osf.models import OSFUser, Node, Institution, Registration
+from osf.utils import permissions as osf_permissions
 
 from api.base import permissions as base_permissions
 from api.base.filters import ListFilterMixin
@@ -26,7 +27,7 @@ from api.users.serializers import UserSerializer
 from api.registrations.serializers import RegistrationSerializer
 
 from api.institutions.authentication import InstitutionAuthentication
-from api.institutions.serializers import InstitutionSerializer, InstitutionNodesRelationshipSerializer
+from api.institutions.serializers import InstitutionSerializer, InstitutionNodesRelationshipSerializer, InstitutionRegistrationsRelationshipSerializer
 from api.institutions.permissions import UserIsAffiliated
 
 class InstitutionMixin(object):
@@ -40,27 +41,13 @@ class InstitutionMixin(object):
             Institution,
             self.kwargs[self.institution_lookup_url_kwarg],
             self.request,
-            display_name='institution'
+            display_name='institution',
         )
         return inst
 
 
 class InstitutionList(JSONAPIBaseView, generics.ListAPIView, ListFilterMixin):
-    """
-    Paginated list of verified Institutions affiliated with COS
-
-    ##Institution Attributes
-
-    OSF Institutions have the "institutions" `type`.
-
-        name           type               description
-        =========================================================================
-        name           string             title of the institution
-        id             string             unique identifier in the OSF
-        logo_path      string             a path to the institution's static logo
-
-    #This Request/Response
-
+    """The documentation for this endpoint can be found [here](https://developer.osf.io/#operation/institutions_list).
     """
     permission_classes = (
         drf_permissions.IsAuthenticatedOrReadOnly,
@@ -87,33 +74,7 @@ class InstitutionList(JSONAPIBaseView, generics.ListAPIView, ListFilterMixin):
 
 
 class InstitutionDetail(JSONAPIBaseView, generics.RetrieveAPIView, InstitutionMixin):
-    """ Details about a given institution.
-
-    ##Attributes
-
-    OSF Institutions have the "institutions" `type`.
-
-        name           type               description
-        =========================================================================
-        name           string             title of the institution
-        id             string             unique identifier in the OSF
-        logo_path      string             a path to the institution's static logo
-
-    ##Relationships
-
-    ###Nodes
-    List of nodes that have this institution as its primary institution.
-
-    ###Users
-    List of users that are affiliated with this institution.
-
-    ##Links
-
-        self:  the canonical api endpoint of this institution
-        html:  this institution's page on the OSF website
-
-    #This Request/Response
-
+    """The documentation for this endpoint can be found [here](https://developer.osf.io/#operation/institutions_detail).
     """
     permission_classes = (
         drf_permissions.IsAuthenticatedOrReadOnly,
@@ -134,10 +95,7 @@ class InstitutionDetail(JSONAPIBaseView, generics.RetrieveAPIView, InstitutionMi
 
 
 class InstitutionNodeList(JSONAPIBaseView, generics.ListAPIView, InstitutionMixin, NodesFilterMixin):
-    """Nodes that have selected an institution as their primary institution.
-
-    ##Permissions
-    Only public nodes or ones in which current user is a contributor.
+    """The documentation for this endpoint can be found [here](https://developer.osf.io/#operation/institutions_node_list).
     """
     permission_classes = (
         drf_permissions.IsAuthenticatedOrReadOnly,
@@ -152,12 +110,17 @@ class InstitutionNodeList(JSONAPIBaseView, generics.ListAPIView, InstitutionMixi
     view_category = 'institutions'
     view_name = 'institution-nodes'
 
-    ordering = ('-date_modified', )
+    ordering = ('-modified', )
 
     # overrides NodesFilterMixin
     def get_default_queryset(self):
         institution = self.get_institution()
-        return institution.nodes.filter(is_public=True, is_deleted=False, type='osf.node')
+        return (
+            institution.nodes.filter(is_public=True, is_deleted=False, type='osf.node')
+            .select_related('node_license')
+            .include('contributor__user__guids', 'root__guids', 'tags', limit_includes=10)
+            .annotate(region=F('addons_osfstorage_node_settings__region___id'))
+        )
 
     # overrides RetrieveAPIView
     def get_queryset(self):
@@ -167,7 +130,7 @@ class InstitutionNodeList(JSONAPIBaseView, generics.ListAPIView, InstitutionMixi
 
 
 class InstitutionUserList(JSONAPIBaseView, ListFilterMixin, generics.ListAPIView, InstitutionMixin):
-    """Users that have been authenticated with the institution.
+    """The documentation for this endpoint can be found [here](https://developer.osf.io/#operation/institutions_users_list).
     """
     permission_classes = (
         drf_permissions.IsAuthenticatedOrReadOnly,
@@ -194,6 +157,16 @@ class InstitutionUserList(JSONAPIBaseView, ListFilterMixin, generics.ListAPIView
 
 
 class InstitutionAuth(JSONAPIBaseView, generics.CreateAPIView):
+    """A dedicated view for institution auth, a.k.a "login through institutions".
+
+    This view is only used and should only be used by CAS.  Changing it may break the institution
+    login feature.  Please check with @longze and @matt before making any changes.
+
+    CAS makes POST request with JWE/JWT encrypted payload to check with OSF on the identity of users
+    authenticated by external institutions.  OSF either finds the matching user or otherwise creates
+    a new one.  Everything happens in the API authentication class and the ``post()`` simply returns
+    a 204 if the auth passes. (See ``api.institutions.authenticationInstitutionAuthentication``)
+    """
     permission_classes = (
         drf_permissions.IsAuthenticated,
         base_permissions.TokenHasScope,
@@ -212,12 +185,12 @@ class InstitutionAuth(JSONAPIBaseView, generics.CreateAPIView):
 
 
 class InstitutionRegistrationList(InstitutionNodeList):
-    """Registrations have selected an institution as their primary institution.
+    """The documentation for this endpoint can be found [here](https://developer.osf.io/#operation/institutions_registration_list).
     """
     serializer_class = RegistrationSerializer
     view_name = 'institution-registrations'
 
-    ordering = ('-date_modified', )
+    ordering = ('-modified', )
 
     def get_default_queryset(self):
         institution = self.get_institution()
@@ -225,6 +198,90 @@ class InstitutionRegistrationList(InstitutionNodeList):
 
     def get_queryset(self):
         return self.get_queryset_from_request()
+
+class InstitutionRegistrationsRelationship(JSONAPIBaseView, generics.RetrieveDestroyAPIView, generics.CreateAPIView, InstitutionMixin):
+    """ Relationship Endpoint for Institution -> Registrations Relationship
+
+    Used to set, remove, update and retrieve the affiliated_institution of registrations with this institution
+
+    ##Actions
+
+    ###Create
+
+        Method:        POST
+        URL:           /links/self
+        Query Params:  <none>
+        Body (JSON):   {
+                         "data": [{
+                           "type": "registrations",   # required
+                           "id": <registration_id>   # required
+                         }]
+                       }
+        Success:       201
+
+    This requires write permissions on the registrations requested and for the user making the request to
+    have the institution affiliated in their account.
+
+    ###Destroy
+
+        Method:        DELETE
+        URL:           /links/self
+        Query Params:  <none>
+        Body (JSON):   {
+                         "data": [{
+                           "type": "registrations",   # required
+                           "id": <registration_id>   # required
+                         }]
+                       }
+        Success:       204
+
+    This requires write permissions in the registrations requested.
+    """
+    permission_classes = (
+        drf_permissions.IsAuthenticatedOrReadOnly,
+        base_permissions.TokenHasScope,
+        UserIsAffiliated,
+    )
+    required_read_scopes = [CoreScopes.NODE_REGISTRATIONS_READ, CoreScopes.INSTITUTION_READ]
+    required_write_scopes = [CoreScopes.NODE_REGISTRATIONS_WRITE]
+    serializer_class = InstitutionRegistrationsRelationshipSerializer
+    parser_classes = (JSONAPIRelationshipParser, JSONAPIRelationshipParserForRegularJSON, )
+
+    view_category = 'institutions'
+    view_name = 'institution-relationships-registrations'
+
+    def get_object(self):
+        inst = self.get_institution()
+        auth = get_user_auth(self.request)
+        registrations = inst.nodes.filter(is_deleted=False, type='osf.registration').can_view(user=auth.user, private_link=auth.private_link)
+        ret = {
+            'data': registrations,
+            'self': inst,
+        }
+        self.check_object_permissions(self.request, ret)
+        return ret
+
+    def perform_destroy(self, instance):
+        data = self.request.data['data']
+        user = self.request.user
+        ids = [datum['id'] for datum in data]
+        registrations = []
+        for id_ in ids:
+            registration = Registration.load(id_)
+            if not registration.has_permission(user, osf_permissions.WRITE):
+                raise exceptions.PermissionDenied(detail='Write permission on registration {} required'.format(id_))
+            registrations.append(registration)
+
+        for registration in registrations:
+            registration.remove_affiliated_institution(inst=instance['self'], user=user)
+            registration.save()
+
+    def create(self, *args, **kwargs):
+        try:
+            ret = super(InstitutionRegistrationsRelationship, self).create(*args, **kwargs)
+        except RelationshipPostMakesNoChanges:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        return ret
 
 class InstitutionNodesRelationship(JSONAPIBaseView, generics.RetrieveDestroyAPIView, generics.CreateAPIView, InstitutionMixin):
     """ Relationship Endpoint for Institution -> Nodes Relationship
@@ -267,10 +324,10 @@ class InstitutionNodesRelationship(JSONAPIBaseView, generics.RetrieveDestroyAPIV
     permission_classes = (
         drf_permissions.IsAuthenticatedOrReadOnly,
         base_permissions.TokenHasScope,
-        UserIsAffiliated
+        UserIsAffiliated,
     )
-    required_read_scopes = [CoreScopes.NULL]
-    required_write_scopes = [CoreScopes.NULL]
+    required_read_scopes = [CoreScopes.NODE_BASE_READ, CoreScopes.INSTITUTION_READ]
+    required_write_scopes = [CoreScopes.NODE_BASE_WRITE]
     serializer_class = InstitutionNodesRelationshipSerializer
     parser_classes = (JSONAPIRelationshipParser, JSONAPIRelationshipParserForRegularJSON, )
 
@@ -283,7 +340,7 @@ class InstitutionNodesRelationship(JSONAPIBaseView, generics.RetrieveDestroyAPIV
         nodes = inst.nodes.filter(is_deleted=False, type='osf.node').can_view(user=auth.user, private_link=auth.private_link)
         ret = {
             'data': nodes,
-            'self': inst
+            'self': inst,
         }
         self.check_object_permissions(self.request, ret)
         return ret

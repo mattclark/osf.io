@@ -33,6 +33,7 @@
             <li role="presentation" id="raw-numbers-tab"><a href="#raw-numbers" role="tab" data-toggle="tab">Raw Numbers</a></li>
             <li role="presentation" id="addons-tab"><a href="#addons" role="tab" data-toggle="tab">Addons</a></li>
             <li role="presentation" id="preprints-tab"><a href="#preprints" role="tab" data-toggle="tab">Preprints</a></li>
+            <li role="presentation" id="downloads-tab"><a href="#downloads" role="tab" data-toggle="tab">Downloads</a></li>
         </ul>
 
         <!-- Tab panes -->
@@ -577,10 +578,50 @@
                                 Stickiness Ratio
                             </div>
                             <div class="chart-stage">
-                                <div id="stickiness-ratio"></div>
+                                <div id="stickiness-ratio-1-day-ago"></div>
                             </div>
                             <div class="chart-notes">
-                                Of those that are active in the last month, how many are active daily? Daily Active Users / Monthly Active Users.
+                                Of those that are active in the last 30 days, how many are active daily?
+                                Formula: Daily Active Users (yesterday) / Daily Active Users previous 30 days
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="chart-wrapper">
+                            <div class="chart-title">
+                                Stickiness Ratio 1 week ago
+                            </div>
+                            <div class="chart-stage">
+                                <div id="stickiness-ratio-1-week-ago"></div>
+                            </div>
+                            <div class="chart-notes">
+                                Stickiness Ratio for the same day of the week 1 week ago.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="chart-wrapper">
+                            <div class="chart-title">
+                                Stickiness Ratio 4 weeks ago
+                            </div>
+                            <div class="chart-stage">
+                                <div id="stickiness-ratio-4-weeks-ago"></div>
+                            </div>
+                            <div class="chart-notes">
+                                Stickiness Ratio for the same day of the week 4 weeks ago.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-sm-4">
+                        <div class="chart-wrapper">
+                            <div class="chart-title">
+                                Stickiness Ratio 52 weeks ago
+                            </div>
+                            <div class="chart-stage">
+                                <div id="stickiness-ratio-52-weeks-ago"></div>
+                            </div>
+                            <div class="chart-notes">
+                                Stickiness Ratio for the same day of the week 52 weeks ago.
                             </div>
                         </div>
                     </div>
@@ -610,39 +651,6 @@
                         </div>
                     </div>
                     <hr class="hr-menu">
-                    <div class="row" id="downloads">
-                        <div class="col-sm-12">
-                            <h3>Downloads</h3>
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div class="col-sm-6">
-                            <div class="chart-wrapper">
-                                <div class="chart-title">
-                                    Downloads
-                                </div>
-                                <div class="chart-stage">
-                                    <div id="number-of-downloads"></div>
-                                </div>
-                                <div class="chart-notes">
-                                    The total number of files downloaded from the OSF
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-sm-6">
-                            <div class="chart-wrapper">
-                                <div class="chart-title">
-                                    Unique Downloads
-                                </div>
-                                <div class="chart-stage">
-                                    <div id="number-of-unique-downloads"></div>
-                                </div>
-                                <div class="chart-notes">
-                                    The number of unique downloads of files on the OSF.
-                                </div>
-                            </div>
-                        </div>
-                    </div>
                     <div class="row" id="projects">
                         <div class="col-sm-12">
                             <h3>Projects</h3>
@@ -675,7 +683,7 @@
                                             <div id="public-projects"></div>
                                         </div>
                                         <div class="chart-notes">
-                                            Notes about this chart
+                                            The total number of public top level projects
                                         </div>
                                     </div>
                                 </div>
@@ -690,7 +698,7 @@
                                             <div id="private-projects"></div>
                                         </div>
                                         <div class="chart-notes">
-                                            Notes about this chart
+                                            The total number of private top level projects
                                         </div>
                                     </div>
                                 </div>
@@ -742,7 +750,7 @@
                                             <div id="public-nodes"></div>
                                         </div>
                                         <div class="chart-notes">
-                                            The total number of private nodes - inccluding projects and components
+                                            The total number of public nodes - including projects and components
                                         </div>
                                     </div>
                                 </div>
@@ -757,7 +765,7 @@
                                             <div id="private-nodes"></div>
                                         </div>
                                         <div class="chart-notes">
-                                            Notes about this chart
+                                            The total number of private nodes - including projects and components
                                         </div>
                                     </div>
                                 </div>
@@ -959,6 +967,66 @@
                                 <span>
                                     <a class="btn btn-success" id="preprints-range">Enter new date range</a>
                                 </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div role="tabpanel" class="tab-pane" id="downloads">
+                <div><h2>Downloads</h2></div>
+                <hr class="hr-menu">
+                <div class="row">
+                    <div class="col-sm-12">
+                        <div class="chart-wrapper">
+                            <div class="chart-title">
+                                Daily download counts
+                            </div>
+                            <div class="chart-stage">
+                                <div id="download-counts"></div>
+                            </div>
+                            <div class="chart-notes">
+                                <div>
+                                    The total number of downloads by non-contribs
+                                </div>
+                                <span>
+                                    Start date range:
+                                    <input id="start-date-downloads" placeholder="yyyy-mm-dd" type="date">
+                                </span>
+                                <span>
+                                    End date range:
+                                    <input id="end-date-downloads" placeholder="yyyy-mm-dd" type="date">
+                                </span>
+                                <span>
+                                    <a class="btn btn-success" id="downloads-range">Enter new date range</a>
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="col-sm-6">
+                        <div class="chart-wrapper">
+                            <div class="chart-title">
+                                Downloads
+                            </div>
+                            <div class="chart-stage">
+                                <div id="number-of-downloads"></div>
+                            </div>
+                            <div class="chart-notes">
+                                The total number of files downloaded from the OSF
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-sm-6">
+                        <div class="chart-wrapper">
+                            <div class="chart-title">
+                                Unique Downloads
+                            </div>
+                            <div class="chart-stage">
+                                <div id="number-of-unique-downloads"></div>
+                            </div>
+                            <div class="chart-notes">
+                                The number of unique downloads of files on the OSF.
                             </div>
                         </div>
                     </div>

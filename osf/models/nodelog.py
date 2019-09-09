@@ -31,6 +31,8 @@ class NodeLog(ObjectIDMixin, BaseModel):
     NODE_CREATED = 'node_created'
     NODE_FORKED = 'node_forked'
     NODE_REMOVED = 'node_removed'
+    NODE_ACCESS_REQUESTS_ENABLED = 'node_access_requests_enabled'
+    NODE_ACCESS_REQUESTS_DISABLED = 'node_access_requests_disabled'
 
     POINTER_CREATED = NODE_LINK_CREATED = 'pointer_created'
     POINTER_FORKED = NODE_LINK_FORKED = 'pointer_forked'
@@ -61,6 +63,8 @@ class NodeLog(ObjectIDMixin, BaseModel):
     FILE_TAG_ADDED = 'file_tag_added'
     FILE_TAG_REMOVED = 'file_tag_removed'
 
+    FILE_METADATA_UPDATED = 'file_metadata_updated'
+
     EDITED_TITLE = 'edit_title'
     EDITED_DESCRIPTION = 'edit_description'
     CHANGED_LICENSE = 'license_changed'
@@ -78,6 +82,9 @@ class NodeLog(ObjectIDMixin, BaseModel):
     FILE_REMOVED = 'file_removed'
     FILE_RESTORED = 'file_restored'
 
+    CATEGORY_UPDATED = 'category_updated'
+    ARTICLE_DOI_UPDATED = 'article_doi_updated'
+
     ADDON_ADDED = 'addon_added'
     ADDON_REMOVED = 'addon_removed'
     COMMENT_ADDED = 'comment_added'
@@ -85,9 +92,9 @@ class NodeLog(ObjectIDMixin, BaseModel):
     COMMENT_UPDATED = 'comment_updated'
     COMMENT_RESTORED = 'comment_restored'
 
-    CITATION_ADDED = 'citation_added'
-    CITATION_EDITED = 'citation_edited'
-    CITATION_REMOVED = 'citation_removed'
+    CUSTOM_CITATION_ADDED = 'custom_citation_added'
+    CUSTOM_CITATION_EDITED = 'custom_citation_edited'
+    CUSTOM_CITATION_REMOVED = 'custom_citation_removed'
 
     MADE_CONTRIBUTOR_VISIBLE = 'made_contributor_visible'
     MADE_CONTRIBUTOR_INVISIBLE = 'made_contributor_invisible'
@@ -99,6 +106,10 @@ class NodeLog(ObjectIDMixin, BaseModel):
     EMBARGO_COMPLETED = 'embargo_completed'
     EMBARGO_INITIATED = 'embargo_initiated'
     EMBARGO_TERMINATED = 'embargo_terminated'
+
+    GROUP_ADDED = 'group_added'
+    GROUP_UPDATED = 'group_updated'
+    GROUP_REMOVED = 'group_removed'
 
     RETRACTION_APPROVED = 'retraction_approved'
     RETRACTION_CANCELLED = 'retraction_cancelled'
@@ -116,16 +127,19 @@ class NodeLog(ObjectIDMixin, BaseModel):
     PREPRINT_FILE_UPDATED = 'preprint_file_updated'
     PREPRINT_LICENSE_UPDATED = 'preprint_license_updated'
 
+    SUBJECTS_UPDATED = 'subjects_updated'
+
     VIEW_ONLY_LINK_ADDED = 'view_only_link_added'
     VIEW_ONLY_LINK_REMOVED = 'view_only_link_removed'
 
     actions = ([CHECKED_IN, CHECKED_OUT, FILE_TAG_REMOVED, FILE_TAG_ADDED, CREATED_FROM, PROJECT_CREATED,
                 PROJECT_REGISTERED, PROJECT_DELETED, NODE_CREATED, NODE_FORKED, NODE_REMOVED,
+                NODE_ACCESS_REQUESTS_ENABLED, NODE_ACCESS_REQUESTS_DISABLED,
                 NODE_LINK_CREATED, NODE_LINK_FORKED, NODE_LINK_REMOVED, WIKI_UPDATED,
                 WIKI_DELETED, WIKI_RENAMED, MADE_WIKI_PUBLIC,
                 MADE_WIKI_PRIVATE, CONTRIB_ADDED, CONTRIB_REMOVED, CONTRIB_REORDERED,
                 PERMISSIONS_UPDATED, MADE_PRIVATE, MADE_PUBLIC, TAG_ADDED, TAG_REMOVED, EDITED_TITLE,
-                EDITED_DESCRIPTION, UPDATED_FIELDS, FILE_MOVED, FILE_COPIED,
+                EDITED_DESCRIPTION, UPDATED_FIELDS, FILE_MOVED, FILE_COPIED, FILE_METADATA_UPDATED,
                 FOLDER_CREATED, FILE_ADDED, FILE_UPDATED, FILE_REMOVED, FILE_RESTORED, ADDON_ADDED,
                 ADDON_REMOVED, COMMENT_ADDED, COMMENT_REMOVED, COMMENT_UPDATED, COMMENT_RESTORED,
                 MADE_CONTRIBUTOR_VISIBLE,
@@ -134,7 +148,7 @@ class NodeLog(ObjectIDMixin, BaseModel):
                 RETRACTION_CANCELLED, RETRACTION_INITIATED, REGISTRATION_APPROVAL_CANCELLED,
                 REGISTRATION_APPROVAL_INITIATED, REGISTRATION_APPROVAL_APPROVED,
                 PREREG_REGISTRATION_INITIATED,
-                CITATION_ADDED, CITATION_EDITED, CITATION_REMOVED,
+                GROUP_ADDED, GROUP_UPDATED, GROUP_REMOVED,
                 AFFILIATED_INSTITUTION_ADDED, AFFILIATED_INSTITUTION_REMOVED, PREPRINT_INITIATED,
                 PREPRINT_FILE_UPDATED, PREPRINT_LICENSE_UPDATED, VIEW_ONLY_LINK_ADDED, VIEW_ONLY_LINK_REMOVED] + list(sum([
                     config.actions for config in apps.get_app_configs() if config.name.startswith('addons.')
@@ -145,11 +159,13 @@ class NodeLog(ObjectIDMixin, BaseModel):
     action = models.CharField(max_length=255, db_index=True)  # , choices=action_choices)
     params = DateTimeAwareJSONField(default=dict)
     should_hide = models.BooleanField(default=False)
-    user = models.ForeignKey('OSFUser', related_name='logs', db_index=True, null=True, blank=True)
+    user = models.ForeignKey('OSFUser', related_name='logs', db_index=True,
+                             null=True, blank=True, on_delete=models.CASCADE)
     foreign_user = models.CharField(max_length=255, null=True, blank=True)
     node = models.ForeignKey('AbstractNode', related_name='logs',
-                             db_index=True, null=True, blank=True)
-    original_node = models.ForeignKey('AbstractNode', db_index=True, null=True, blank=True)
+                             db_index=True, null=True, blank=True, on_delete=models.CASCADE)
+    original_node = models.ForeignKey('AbstractNode', db_index=True,
+                                      null=True, blank=True, on_delete=models.CASCADE)
 
     def __unicode__(self):
         return ('({self.action!r}, user={self.user!r},, node={self.node!r}, params={self.params!r}) '
@@ -170,24 +186,6 @@ class NodeLog(ObjectIDMixin, BaseModel):
     @property
     def absolute_url(self):
         return self.absolute_api_v2_url
-
-    def clone_node_log(self, node_id):
-        """
-        When a node is forked or registered, all logs on the node need to be
-        cloned for the fork or registration.
-
-        :param node_id:
-        :return: cloned log
-        """
-        AbstractNode = apps.get_model('osf.AbstractNode')
-        original_log = self.load(self._id)
-        node = AbstractNode.load(node_id)
-        log_clone = original_log.clone()
-        log_clone.node = node
-        log_clone.original_node = original_log.original_node
-        log_clone.user = original_log.user
-        log_clone.save()
-        return log_clone
 
     def _natural_key(self):
         return self._id

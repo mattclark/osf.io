@@ -8,7 +8,7 @@ var Raven = require('raven-js');
 var $osf = require('js/osfHelpers');
 var oop = require('js/oop');
 
-var s3Settings = require('json!./settings.json');
+var s3Settings = require('json-loader!./settings.json');
 
 var OauthAddonFolderPicker = require('js/oauthAddonNodeConfig')._OauthAddonNodeConfigViewModel;
 
@@ -119,7 +119,7 @@ var s3FolderPickerViewModel = oop.extend(OauthAddonFolderPicker, {
         var isIpAddress = /^[0-9]+(?:\.[0-9]+){3}$/;
         return bucketName.length >= 3 && bucketName.length <= 63 &&
             strictBucketName.test(bucketName) && !isIpAddress.test(bucketName);
-    }, 
+    },
 
     /** Reset all fields from S3 credentials input modal */
     clearModal: function() {
@@ -209,7 +209,7 @@ var s3FolderPickerViewModel = oop.extend(OauthAddonFolderPicker, {
                                 '</div>' +
                             '</form>' +
                             '<span>For more information on locations, click ' +
-                                '<a href="http://help.osf.io/m/addons/l/524149#BucketLocations">here</a>' +
+                                '<a href="http://help.osf.io/m/addons/l/863985">here</a>' +
                             '</span>' +
                         '</div>' +
                     '</div>',

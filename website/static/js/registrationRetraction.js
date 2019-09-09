@@ -12,7 +12,6 @@ var ChangeMessageMixin = require('js/changeMessage');
 var oop = require('js/oop');
 var Raven = require('raven-js');
 
-
 var RegistrationRetractionViewModel = oop.extend(
     ChangeMessageMixin,
     {
@@ -39,12 +38,12 @@ var RegistrationRetractionViewModel = oop.extend(
             });
         },
         SUBMIT_ERROR_MESSAGE: 'Error submitting your withdrawal request, please try again. If the problem ' +
-                'persists, email <a href="mailto:support@osf.iop">support@osf.io</a>',
+                'persists, email ' + $osf.osfSupportLink(),
         CONFIRMATION_ERROR_MESSAGE: 'Please enter the registration title before clicking Withdraw Registration',
         JUSTIFICATON_ERROR_MESSAGE: 'Your justification is too long, please enter a justification with no more ' +
             'than 2048 characters long.',
         MESSAGE_ERROR_CLASS: 'text-danger',
-        onSubmitSuccess: function(response) {            
+        onSubmitSuccess: function(response) {
             window.location = response.redirectUrl;
         },
         onSubmitError: function(xhr, status, errorThrown) {

@@ -1,3 +1,5 @@
+import re
+
 from django.apps import apps
 from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework import generics, permissions as drf_permissions
@@ -49,7 +51,7 @@ class AddonSettingsMixin(object):
             authorizer = None
             if owner_type == 'user':
                 authorizer = addon_settings.owner
-            elif hasattr(addon_settings, 'user_settings'):
+            elif getattr(addon_settings, 'user_settings', None):
                 authorizer = addon_settings.user_settings.owner
             if authorizer and authorizer != self.request.user:
                 raise PermissionDenied('Must be addon authorizer to list folders')
@@ -57,27 +59,7 @@ class AddonSettingsMixin(object):
         return addon_settings
 
 class AddonList(JSONAPIBaseView, generics.ListAPIView, ListFilterMixin):
-    """List of addons configurable with the OSF *Read-only*.
-
-    Paginated list of addons associated with third-party services
-
-    ##Permissions
-
-    No restrictions.
-
-    ## <Addon> Attributes
-
-    OSF <Addon\> entities have the "addons" `type`, and their `id` indicates the
-    `short_name` of the associated service provider (eg. `box`, `googledrive`, etc).
-
-        name        type        description
-        ======================================================================================================
-        url         string      Url of this third-party service
-        name        string      `full_name` of third-party service provider
-        description string      Description of this addon
-        categories  list        List of categories this addon belongs to
-
-    #This Request/Response
+    """The documentation for this endpoint can be found [here](https://developer.osf.io/#operation/addons_list).
     """
     permission_classes = (
         drf_permissions.AllowAny,
@@ -95,7 +77,29 @@ class AddonList(JSONAPIBaseView, generics.ListAPIView, ListFilterMixin):
     ordering = ()
 
     def get_default_queryset(self):
-        return [conf for conf in osf_settings.ADDONS_AVAILABLE_DICT.itervalues() if 'accounts' in conf.configs]
+        return [conf for conf in osf_settings.ADDONS_AVAILABLE_DICT.values() if 'accounts' in conf.configs]
 
     def get_queryset(self):
         return self.get_queryset_from_request()
+
+    def param_queryset(self, query_params, default_queryset):
+        """filters default queryset based on query parameters"""
+        filters = self.parse_query_params(query_params)
+        queryset = set(default_queryset)
+
+        if filters:
+            for key, field_names in filters.items():
+                match = self.QUERY_PATTERN.match(key)
+                fields = match.groupdict()['fields']
+                statement = len(re.findall(self.FILTER_FIELDS, fields)) > 1  # This indicates an OR statement
+                sub_query = set() if statement else set(default_queryset)
+                for field_name, data in field_names.items():
+                    operations = data if isinstance(data, list) else [data]
+                    for operation in operations:
+                        if statement:
+                            sub_query = sub_query.union(set(self.get_filtered_queryset(field_name, operation, list(default_queryset))))
+                        else:
+                            sub_query = sub_query.intersection(set(self.get_filtered_queryset(field_name, operation, list(default_queryset))))
+
+                queryset = sub_query.intersection(queryset)
+        return list(queryset)

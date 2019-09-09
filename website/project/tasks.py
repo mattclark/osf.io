@@ -33,6 +33,19 @@ def on_node_updated(node_id, user_id, first_save, saved_fields, request_headers=
     if need_update:
         node.update_search()
         update_node_share(node)
+        update_collecting_metadata(node, saved_fields)
+
+    if node.get_identifier_value('doi') and bool(node.IDENTIFIER_UPDATE_FIELDS.intersection(saved_fields)):
+        node.request_identifier_update(category='doi')
+
+def update_collecting_metadata(node, saved_fields):
+    from website.search.search import update_collected_metadata
+    if node.is_collected:
+        if node.is_public:
+            update_collected_metadata(node._id)
+        else:
+            if 'is_public' in saved_fields:
+                update_collected_metadata(node._id, op='delete')
 
 def update_node_share(node):
     # Wrapper that ensures share_url and token exist
@@ -93,6 +106,8 @@ def serialize_share_node_data(node):
     }
 
 def format_node(node):
+    is_qa_node = bool(set(settings.DO_NOT_INDEX_LIST['tags']).intersection(node.tags.all().values_list('name', flat=True))) \
+        or any(substring in node.title for substring in settings.DO_NOT_INDEX_LIST['titles'])
     return [
         {
             '@id': '_:123',
@@ -102,15 +117,18 @@ def format_node(node):
         }, {
             '@id': '_:789',
             '@type': 'project',
-            'is_deleted': not node.is_public or node.is_deleted or node.is_spammy,
+            'is_deleted': not node.is_public or node.is_deleted or node.is_spammy or is_qa_node
         }
     ]
 
 def format_registration(node):
+    is_qa_node = bool(set(settings.DO_NOT_INDEX_LIST['tags']).intersection(node.tags.all().values_list('name', flat=True))) \
+        or any(substring in node.title for substring in settings.DO_NOT_INDEX_LIST['titles'])
+
     registration_graph = GraphNode('registration', **{
         'title': node.title,
         'description': node.description or '',
-        'is_deleted': not node.is_public or 'qatest' in (node.tags.all() or []) or node.is_deleted,
+        'is_deleted': not node.is_public or node.is_deleted or is_qa_node,
         'date_published': node.registered_date.isoformat() if node.registered_date else None,
         'registration_type': node.registered_schema.first().name if node.registered_schema else None,
         'withdrawn': node.is_retracted,
@@ -130,6 +148,14 @@ def format_registration(node):
     to_visit.extend(format_contributor(registration_graph, user, bool(user._id in node.visible_contributor_ids), i) for i, user in enumerate(node.contributors))
     to_visit.extend(GraphNode('AgentWorkRelation', creative_work=registration_graph, agent=GraphNode('institution', name=institution.name)) for institution in node.affiliated_institutions.all())
 
+    if node.parent_node:
+        parent = GraphNode('registration')
+        to_visit.extend([
+            parent,
+            GraphNode('workidentifier', creative_work=parent, uri=urlparse.urljoin(settings.DOMAIN, node.parent_node.url)),
+            GraphNode('ispartof', subject=registration_graph, related=parent),
+        ])
+
     visited = set()
     to_visit.extend(registration_graph.get_related())
 
@@ -146,9 +172,10 @@ def format_registration(node):
 
 def send_desk_share_error(node, resp, retries):
     mails.send_mail(
-        to_addr=settings.SUPPORT_EMAIL,
+        to_addr=settings.OSF_SUPPORT_EMAIL,
         mail=mails.SHARE_ERROR_DESK,
         node=node,
         resp=resp,
         retries=retries,
+        can_change_preferences=False,
     )

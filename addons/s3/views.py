@@ -11,6 +11,7 @@ from addons.base import generic_views
 from addons.s3 import utils
 from addons.s3.serializer import S3Serializer
 from osf.models import ExternalAccount
+from osf.utils.permissions import WRITE
 from website.project.decorators import (
     must_have_addon, must_have_permission,
     must_be_addon_authorizer,
@@ -102,6 +103,10 @@ def s3_add_user_account(auth, **kwargs):
             provider=SHORT_NAME,
             provider_id=user_info.id
         )
+        if account.oauth_key != access_key or account.oauth_secret != secret_key:
+            account.oauth_key = access_key
+            account.oauth_secret = secret_key
+            account.save()
     assert account is not None
 
     if not auth.user.external_accounts.filter(id=account.id).exists():
@@ -116,7 +121,7 @@ def s3_add_user_account(auth, **kwargs):
 
 @must_be_addon_authorizer(SHORT_NAME)
 @must_have_addon('s3', 'node')
-@must_have_permission('write')
+@must_have_permission(WRITE)
 def create_bucket(auth, node_addon, **kwargs):
     bucket_name = request.json.get('bucket_name', '')
     bucket_location = request.json.get('bucket_location', '')
